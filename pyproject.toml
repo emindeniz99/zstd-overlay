@@ -1,0 +1,41 @@
+[project]
+name = "zstd-overlay"
+version = "0.1.0"
+description = "Transparent zstd compression for folders in a Claude Code cloud session"
+readme = "README.md"
+authors = [{ name = "Emin Deniz", email = "emindeniz99@gmail.com" }]
+# Ubuntu 24.04 ships 3.12 and a cloud session 3.13; 3.11 is the oldest security-supported line.
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.uv]
+# One file, `zstd-overlay`, run by the system Python: nothing to build or install.
+package = false
+# Stack supply-chain rule: resolve nothing published in the last 7 days.
+exclude-newer = "7 days"
+
+[dependency-groups]
+dev = ["coverage", "pytest", "ruff", "ty"]
+
+[tool.ruff]
+line-length = 120
+include = ["zstd-overlay", "tests/*.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "PT"]
+
+[tool.ty.src]
+include = ["zstd-overlay", "tests"]
+
+[tool.pytest]
+strict = true
+testpaths = ["tests"]
+addopts = ["-ra"]
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+branch = true
+include = ["zstd-overlay"]
+
+[tool.coverage.report]
+show_missing = true

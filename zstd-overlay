@@ -1,377 +1,717 @@
-#!/bin/bash
-# zstd-overlay: transparent zstd compression for folders on a Linux VM, built
-# for Claude Code cloud sessions (30 GB disk, root, kernel with btrfs and
-# overlayfs). Installs nothing: an empty btrfs image ships at the end of this
-# file, and the kernel does the rest.
-#
-# Every write under a mounted folder lands in a compressed btrfs image. What the
-# folder held before stays where it was and stays readable. Programs see plain
-# files; pnpm, cargo, uv, dotnet and the rest need no flags.
-#
-# Usage:
-#   zstd-overlay up [DIR...]         mount DIRs (default list when none is given)
-#   zstd-overlay up --merge DIR...   mount DIR although it changed while unmounted;
-#                                    the changed files win (look first: `doctor`)
-#   zstd-overlay up --hook [...]     as up, for a SessionStart hook: exits 0 and
-#                                    reports refused folders in JSON
-#   zstd-overlay migrate DIR...      move what DIR already holds into the image
-#   zstd-overlay install             copy to /usr/local/bin and add a SessionStart hook
-#   zstd-overlay status              disk use, capacity, mounted folders
-#   zstd-overlay doctor              what is mounted, what is not, and why
-#
-# Default list: $CLAUDE_PROJECT_DIR, ~/.cache, ~/.local/share, ~/.local/bin, ~/.npm,
-# and whichever of ~/.rustup ~/.cargo ~/go ~/.m2 ~/.gradle ~/.nuget ~/.dotnet
-# ~/.bun exist.
-#
-# A VM restore drops every mount, so `install` runs `up` from a SessionStart
-# hook. A folder written to while it was not mounted is not mounted again
-# (those writes would be hidden under the image); `up` names the files and
-# leaves the folder on the normal disk until you decide.
-#
-# The image reserves its disk space up front (fallocate), leaving
-# ZSTD_OVERLAY_RESERVE_MB free outside it. A disk that fills from outside then
-# gives the writer outside a plain "No space left"; the image, whose blocks are
-# already its own, keeps working. (A sparse image would take that error itself,
-# as an I/O error, and btrfs would turn read-only.)
-#
-# Environment: ZSTD_OVERLAY_IMG (default /var/lib/zstd-overlay/disk.img),
-# ZSTD_OVERLAY_MNT (default /mnt/zstd-overlay), ZSTD_OVERLAY_RESERVE_MB (4096).
-set -euo pipefail
-shopt -s nullglob
+#!/usr/bin/env python3
+"""zstd-overlay: transparent zstd compression for folders on a Linux VM, built
+for Claude Code cloud sessions (30 GB disk, root, kernel with btrfs and
+overlayfs). Python 3.11+, standard library only; installs nothing: an empty
+btrfs image ships at the end of this file, and the kernel does the rest.
 
-IMG=${ZSTD_OVERLAY_IMG:-/var/lib/zstd-overlay/disk.img}
-MNT=${ZSTD_OVERLAY_MNT:-/mnt/zstd-overlay}
-RESERVE=$(( ${ZSTD_OVERLAY_RESERVE_MB:-4096} * 1048576 ))
-OPTS=noatime,compress-force=zstd:3,nodiscard
-SELF=$(realpath "${BASH_SOURCE[0]}")
-LOCK=/run/zstd-overlay.lock
-REFUSED=0
+Every write under a mounted folder lands in a compressed btrfs image. What the
+folder held before stays where it was and stays readable. Programs see plain
+files; pnpm, cargo, uv, dotnet and the rest need no flags.
 
-say() { printf 'zstd-overlay: %s\n' "$*"; }
-die() { printf 'zstd-overlay: %s\n' "$*" >&2; exit 2; }
-gib() { awk -v b="$1" 'BEGIN { printf "%.1f GiB", b / 1073741824 }'; }
+Usage:
+  zstd-overlay up [DIR...]         mount DIRs (default list when none is given)
+  zstd-overlay up --merge DIR...   mount DIR although it changed while unmounted;
+                                   the changed files win (look first: `doctor`)
+  zstd-overlay up --hook [DIR...]  as up, for a SessionStart hook: exits 0 and
+                                   reports refused folders in JSON
+  zstd-overlay migrate DIR...      move what DIR already holds into the image
+  zstd-overlay install             copy to /usr/local/bin and add a SessionStart hook
+  zstd-overlay status              disk use, capacity, mounted folders
+  zstd-overlay doctor              what is mounted, what is not, and why
 
-usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$SELF"; }
+Default list: $CLAUDE_PROJECT_DIR, ~/.cache, ~/.local/share, ~/.local/bin, ~/.npm,
+and whichever of ~/.rustup ~/.cargo ~/go ~/.m2 ~/.gradle ~/.nuget ~/.dotnet
+~/.bun exist.
 
-key_of() { local k=${1//\//%}; printf '%s' "$k"; }
+A VM restore drops every mount, so `install` runs `up --hook` from a
+SessionStart hook. A folder written to while it was not mounted is not mounted
+again (those writes would be hidden under the image); `up` names the files and
+leaves the folder on the normal disk until you decide.
 
-# --- the image ---------------------------------------------------------------
+The image reserves its disk space up front (fallocate), leaving
+ZSTD_OVERLAY_RESERVE_MB free outside it. A disk that fills from outside then
+gives the writer outside a plain "No space left"; the image, whose blocks are
+already its own, keeps working. (A sparse image would take that error itself,
+as an I/O error, and btrfs would turn read-only.)
 
-# Capacity = the image's own blocks + free disk - RESERVE, all of it allocated
-# (fallocate) so the blocks are the image's before btrfs writes to them. Grows
-# when the disk has room; shrinks when writes outside ate into the reserve.
-fit_image() {
-  local dev cur held avail target
-  dev=$(findmnt -n -o SOURCE "$MNT")
-  cur=$(df -B1 --output=size "$MNT" | tail -1 | tr -d ' ')
-  held=$(du -B1 "$IMG" | cut -f1)
-  avail=$(df -B1 --output=avail "$(dirname "$IMG")" | tail -1 | tr -d ' ')
-  target=$(( (held + avail - RESERVE) / 1048576 * 1048576 ))
-  [ "$target" -gt $(( 512 * 1048576 )) ] || target=$(( 512 * 1048576 ))
-  if [ $(( target > cur ? target - cur : cur - target )) -ge $(( 256 * 1048576 )) ]; then
-    if [ "$target" -gt "$cur" ]; then
-      fallocate -l "$target" "$IMG" || { say "warning: no room to grow the image"; return 0; }
-      losetup -c "$dev"
-      btrfs_resize "$target" || say "warning: could not grow the image to $(gib "$target")"
-    else
-      # Shrink in 256 MiB steps: one big step must move every block group above the new
-      # end at once and often fails with ENOSPC; small steps succeed (measured). Keep
-      # whatever the steps gave back.
-      local size=$cur next
-      while [ "$size" -gt "$target" ]; do
-        next=$(( size - 256 * 1048576 )); [ "$next" -ge "$target" ] || next=$target
-        btrfs_resize "$next" || { sync; sleep 2; btrfs_resize "$next"; } || break
-        size=$next
-      done
-      if [ "$size" -lt "$cur" ]; then truncate -s "$size" "$IMG"; losetup -c "$dev"; fi
-      [ "$size" -le "$target" ] || say "warning: only $(gib "$avail") free outside the image (reserve $(gib "$RESERVE")); the image gave back $(gib $(( cur - size ))) of $(gib $(( cur - target ))) ($RESIZE_ERR)"
-    fi
-  fi
-  # A fresh image (sparse) or a short fallocate leaves holes; claim them now.
-  cur=$(df -B1 --output=size "$MNT" | tail -1 | tr -d ' ')
-  [ "$(du -B1 "$IMG" | cut -f1)" -ge "$cur" ] || fallocate -l "$cur" "$IMG" \
-    || say "warning: could not reserve the image's space; writes outside could break it"
-}
+Environment: ZSTD_OVERLAY_IMG (default /var/lib/zstd-overlay/disk.img),
+ZSTD_OVERLAY_MNT (default /mnt/zstd-overlay), ZSTD_OVERLAY_RESERVE_MB (4096).
 
-# BTRFS_IOC_RESIZE through perl (in every Ubuntu/Debian base); no btrfs-progs needed.
-RESIZE_ERR=""
-btrfs_resize() {
-  RESIZE_ERR=$(perl -e 'open(my $fh, "<", $ARGV[0]) or die "$ARGV[0]: $!\n";
-           ioctl($fh, 0x50009403, pack("q a4088", 0, $ARGV[1])) or die "resize: $!\n";' \
-    "$MNT" "$1" 2>&1)
-}
+Exit status: 0 done; 2 an error stopped it; 3 some folders were refused.
+"""
 
-mount_image() {
-  if mountpoint -q "$MNT"; then
-    local back; back=$(losetup -nO BACK-FILE "$(findmnt -n -o SOURCE "$MNT")" 2>/dev/null | sed 's/ *$//')
-    [ "$back" = "$(realpath -m "$IMG")" ] || die "$MNT is mounted from ${back:-something else}, not $IMG"
-    case ",$(findmnt -n -o OPTIONS "$MNT")," in *,ro,*)
-      die "the image went read-only (see dmesg). Save what you need, unmount the folders and $MNT, then run up again" ;;
-    esac
-    fit_image; return
-  fi
-  mkdir -p "$(dirname "$IMG")" "$MNT"
-  if [ ! -f "$IMG" ]; then
-    local tmp; tmp=$(mktemp -d "$(dirname "$IMG")/.new.XXXXXX")
-    sed -n '/^__ZSTD_OVERLAY_BLOB__$/,$p' "$SELF" | tail -n +2 | base64 -d | tar -xzSf - -C "$tmp"
-    mv "$tmp/disk.img" "$IMG"; rmdir "$tmp"
-  fi
-  mount -o "loop,$OPTS" "$IMG" "$MNT"
-  mkdir -p "$MNT/upper" "$MNT/work" "$MNT/stamps"
-  fit_image
-}
+from __future__ import annotations
 
-# --- folders -----------------------------------------------------------------
+import base64
+import contextlib
+import fcntl
+import io
+import json
+import os
+import shutil
+import struct
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
 
-our_overlays() { findmnt -rn -t overlay -o TARGET,OPTIONS | awk -v u="upperdir=$MNT/upper/" 'index($2, u) { print $1 }' | sed 's/\\x20/ /g'; }
-is_mounted() { our_overlays | grep -Fxq "$1"; }
+MiB = 1 << 20
+GiB = 1 << 30
+OPTS = "noatime,compress-force=zstd:3,nodiscard"
+HOOK_COMMAND = "/usr/local/bin/zstd-overlay up --hook"
+INSTALL_PATH = Path("/usr/local/bin/zstd-overlay")
+LOCK_PATH = "/run/zstd-overlay.lock"
+SHRINK_STEP = 256 * MiB
+MIN_CAPACITY = 512 * MiB
+BTRFS_IOC_RESIZE = 0x50009403  # _IOW(0x94, 3, struct btrfs_ioctl_vol_args), 4096 bytes
+LOOP_SET_CAPACITY = 0x4C07
 
-# Folders that must never be covered: the system, Claude Code's own state, the image.
-guard() {
-  local dir=$1 p
-  case "$dir" in
-    /usr/local/?*) ;;
-    / | /bin | /boot | /dev | /etc | /home | /lib | /lib64 | /opt | /proc | /root | /run | /sbin | /srv \
-    | /sys | /usr | /usr/* | /var | /var/lib | /var/lib/dpkg* | /opt/claude-code*)
-      echo "a system folder"; return 1 ;;
-  esac
-  for p in "$HOME/.claude" "$MNT" "$IMG"; do
-    case "$p/" in "$dir"/*) echo "it holds $p"; return 1 ;; esac
-    [ "$p" = "$IMG" ] && continue
-    case "$dir/" in "$p"/*) echo "it is inside $p"; return 1 ;; esac
-  done
-  local o
-  while IFS= read -r o; do
-    [ -n "$o" ] && [ "$o" != "$dir" ] || continue
-    case "$dir/" in "$o"/*) echo "it is inside $o, which is already mounted"; return 1 ;; esac
-    case "$o/" in "$dir"/*) echo "it holds $o, which is already mounted"; return 1 ;; esac
-  done < <(our_overlays)
-}
+# Folders that must never be covered. `/usr/local/...` and `/opt/<tool>` are allowed.
+SYSTEM = {
+    "/", "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib64", "/opt", "/proc", "/root",
+    "/run", "/sbin", "/srv", "/sys", "/usr", "/var", "/var/lib",
+}  # fmt: skip
+DEFAULT_TOOL_DIRS = (".rustup", ".cargo", "go", ".m2", ".gradle", ".nuget", ".dotnet", ".bun")
 
-# Files changed in DIR (the lower layer) since its last mount. ctime, not mtime:
-# `cp -a` and `tar -p` can set mtime back, nothing sets ctime back.
-changed_since_mount() {
-  local dir=$1 stamp=$MNT/stamps/$(key_of "$1")
-  [ -f "$stamp" ] || return 0
-  find "$dir" -xdev -cnewer "$stamp" -print 2>/dev/null
-}
 
-mount_dir() { # dir [merge]
-  local dir=$1 merge=${2:-0} key why changed tmp
-  key=$(key_of "$dir")
-  is_mounted "$dir" && return 0
-  if ! why=$(guard "$dir"); then say "refused: $dir ($why)"; REFUSED=1; return 0; fi
-  mkdir -p "$dir"
-  changed=$(changed_since_mount "$dir")
-  if [ -n "$changed" ] && [ "$merge" != 1 ]; then
-    say "NOT MOUNTED: $dir changed while it was not mounted; mounting would hide these:"
-    printf '%s\n' "$changed" | head -20 | sed 's/^/    /'
-    [ "$(printf '%s\n' "$changed" | wc -l)" -le 20 ] || say "    ... and $(( $(printf '%s\n' "$changed" | wc -l) - 20 )) more"
-    say "  it stays on the normal disk. Keep those changes: zstd-overlay up --merge $dir"
-    REFUSED=1; return 0
-  fi
-  if [ -n "$changed" ]; then   # --merge: set the changed files aside, mount, put them back on top
-    tmp=$(mktemp -d "$MNT/merge.XXXXXX")
-    find "$dir" -xdev -cnewer "$MNT/stamps/$key" ! -type d -printf '%P\0' \
-      | tar -C "$dir" --null -T - -cf - | tar -C "$tmp" -xpf -
-  fi
-  mkdir -p "$MNT/upper/$key" "$MNT/work/$key"
-  mount -t overlay overlay -o "lowerdir=$dir,upperdir=$MNT/upper/$key,workdir=$MNT/work/$key" "$dir"
-  if [ -n "${tmp:-}" ]; then cp -a "$tmp/." "$dir/"; rm -rf "$tmp"; say "merged $(printf '%s\n' "$changed" | wc -l) changed paths into $dir"; fi
-  touch "$MNT/stamps/$key"
-  say "compressed: $dir"
-  stale_processes "$dir"
-}
+class Stop(Exception):
+    """A precondition failed; exit 2 with this message."""
 
-# A process that was already inside DIR keeps the old folder as its working
-# directory: what it writes by relative path goes there, under the mount.
-# Claude Code itself is not one of them: it resolves its working directory by
-# path for every command, so commands it starts after the mount see the image
-# (checked in a session on 2026-11-02).
-stale_processes() {
-  local dir=$1 lowerdev pid cwd names=()
-  lowerdev=$(stat -c %d "$(dirname "$dir")")
-  for pid in /proc/[0-9]*; do
-    grep -qa zstd-overlay "$pid/cmdline" 2>/dev/null && continue
-    case "$(readlink "$pid/exe" 2>/dev/null)" in */claude) continue ;; esac
-    cwd=$(readlink "$pid/cwd" 2>/dev/null) || continue
-    case "$cwd/" in "$dir"/*) ;; *) continue ;; esac
-    [ "$(stat -L -c %d "$pid/cwd" 2>/dev/null)" = "$lowerdev" ] || continue
-    names+=("${pid#/proc/}:$(tr '\0' ' ' < "$pid/cmdline" | cut -c1-40 | sed 's/ *$//')")
-  done
-  [ ${#names[@]} -eq 0 ] && return 0
-  say "  note: ${#names[@]} process(es) started earlier still work in the old $dir; what they write by"
-  say "  relative path goes under the mount. Restart them if they write there: $(printf '%s, ' "${names[@]:0:4}" | sed 's/, $//')$([ ${#names[@]} -le 4 ] || echo ", ...")"
-}
 
-default_dirs() {
-  [ -n "${CLAUDE_PROJECT_DIR:-}" ] && printf '%s\n' "$CLAUDE_PROJECT_DIR"
-  printf '%s\n' "$HOME/.cache" "$HOME/.local/share" "$HOME/.local/bin" "$HOME/.npm"
-  local d
-  for d in .rustup .cargo go .m2 .gradle .nuget .dotnet .bun; do
-    [ -d "$HOME/$d" ] && printf '%s\n' "$HOME/$d"
-  done
-  return 0
-}
+def say(msg: str) -> None:
+    print(f"zstd-overlay: {msg}", flush=True)
 
-RESOLVED=()
-resolve_dirs() { # sets RESOLVED to absolute paths, refusing a folder listed inside another
-  local d all=() o nested
-  RESOLVED=()
-  for d in "$@"; do [ -n "$d" ] && all+=("$(realpath -m "$d")"); done
-  for d in "${all[@]}"; do
-    nested=""
-    for o in "${all[@]}"; do
-      if [ "$o" != "$d" ]; then case "$d/" in "$o"/*) nested=$o ;; esac; fi
-    done
-    if [ -n "$nested" ]; then say "refused: $d (it is inside $nested, also listed)"; REFUSED=1; else RESOLVED+=("$d"); fi
-  done
-}
 
-# --- commands ----------------------------------------------------------------
+def gib(n: int) -> str:
+    return f"{n / GiB:.1f} GiB"
 
-cmd_up() {
-  local merge=0 d dirs
-  if [ "${1:-}" = --merge ]; then merge=1; shift; [ $# -gt 0 ] || die "--merge needs the folders to merge"; fi
-  mount_image
-  if [ $# -eq 0 ]; then mapfile -t dirs < <(default_dirs); else dirs=("$@"); fi
-  resolve_dirs "${dirs[@]}"
-  for d in "${RESOLVED[@]}"; do mount_dir "$d" "$merge"; done
-}
 
-tree_sig() { # entry count and total file bytes of a tree
-  printf '%s:%s' "$(find "$1" | wc -l)" "$(find "$1" -type f -printf '%s\n' | awk '{ s += $1 } END { print s + 0 }')"
-}
+def key_of(path: str) -> str:
+    return path.replace("/", "%")
 
-cmd_migrate() {
-  [ $# -gt 0 ] || die "migrate needs folders"
-  mount_image
-  local d key new before after
-  resolve_dirs "$@"
-  for d in "${RESOLVED[@]}"; do
-    if [ "$d" = "${CLAUDE_PROJECT_DIR:-}" ] || git -C "$d" rev-parse --show-toplevel 2>/dev/null | grep -Fxq "$d"; then
-      say "refused: $d is a repository; repositories are mounted, never migrated"; REFUSED=1; continue
-    fi
-    if is_mounted "$d"; then say "skipped: $d is mounted already; migrate runs before the first mount of a session"; continue; fi
-    [ -d "$d" ] || { say "skipped: $d does not exist"; continue; }
-    mount_dir "$d"
-    is_mounted "$d" || continue
-    key=$(key_of "$d"); new=$MNT/upper/$key.migrating
-    rm -rf "$new"; mkdir -p "$new"
-    # Copy the merged view: it already hides what was deleted and shows the newest version.
-    cp -a --reflink=auto "$d/." "$new/"
-    before=$(tree_sig "$d"); after=$(tree_sig "$new")
-    if [ "$before" != "$after" ]; then
-      rm -rf "$new"; say "migrate aborted: the copy of $d has $after (entries:bytes), expected $before; nothing changed"; REFUSED=1; continue
-    fi
-    umount "$d"
-    mv "$d" "$d.zstd-overlay-old"
-    mkdir "$d"; chmod --reference="$d.zstd-overlay-old" "$d"; chown --reference="$d.zstd-overlay-old" "$d"
-    rm -rf "$MNT/upper/$key" "$MNT/work/$key"; mv "$new" "$MNT/upper/$key"
-    rm -f "$MNT/stamps/$key"
-    mount_dir "$d"
-    if is_mounted "$d" && [ "$(tree_sig "$d")" = "$before" ]; then
-      rm -rf "$d.zstd-overlay-old"
-      say "migrated: $d ($(gib "${before#*:}") now in the image)"
-    else
-      say "migrate check failed: $d.zstd-overlay-old kept; nothing deleted"; REFUSED=1
-    fi
-  done
-}
 
-cmd_install() {
-  local settings=$HOME/.claude/settings.json hook tmp
-  [ "$SELF" = /usr/local/bin/zstd-overlay ] || install -m 755 "$SELF" /usr/local/bin/zstd-overlay
-  hook='{"matcher":"startup|resume","hooks":[{"type":"command","command":"/usr/local/bin/zstd-overlay up --hook","timeout":600}]}'
-  mkdir -p "$HOME/.claude"; [ -s "$settings" ] || echo '{}' > "$settings"
-  tmp=$(mktemp "$settings.XXXXXX")
-  # Replace any earlier zstd-overlay hook rather than adding a second one.
-  if command -v jq >/dev/null; then
-    jq --argjson h "$hook" '
-      .hooks.SessionStart = ((.hooks.SessionStart // [])
-        | map(select(any(.hooks[]?; (.command // "") | startswith("/usr/local/bin/zstd-overlay ")) | not)) + [$h])' \
-      "$settings" > "$tmp" || { rm -f "$tmp"; die "$settings is not valid JSON; left unchanged"; }
-  elif command -v python3 >/dev/null; then
-    python3 -I - "$settings" "$hook" > "$tmp" <<'PY' || { rm -f "$tmp"; die "$settings is not valid JSON; left unchanged"; }
-import json, sys
-s = json.load(open(sys.argv[1])); h = json.loads(sys.argv[2])
-ss = s.setdefault("hooks", {}).setdefault("SessionStart", [])
-ours = lambda e: any((x.get("command") or "").startswith("/usr/local/bin/zstd-overlay ") for x in e.get("hooks", []))
-ss[:] = [e for e in ss if not ours(e)]
-ss.append(h); json.dump(s, sys.stdout, indent=2); print()
-PY
-  else
-    rm -f "$tmp"; die "need jq or python3 to edit $settings; add this SessionStart hook by hand: $hook"
-  fi
-  mv "$tmp" "$settings"
-  say "installed /usr/local/bin/zstd-overlay and a SessionStart hook in $settings"
-  say "the image is created at the first session start, not now"
-}
+@dataclass
+class Config:
+    img: str
+    mnt: str
+    reserve: int
+    home: str
+    project: str
 
-cmd_status() {
-  mountpoint -q "$MNT" || { say "image not mounted (run: zstd-overlay up)"; return 0; }
-  local held stored cap avail
-  held=$(du -B1 "$IMG" | cut -f1)
-  stored=$(du -s --apparent-size -B1 "$MNT/upper" | cut -f1)
-  cap=$(df -B1 --output=size "$MNT" | tail -1 | tr -d ' ')
-  avail=$(df -B1 --output=avail "$(dirname "$IMG")" | tail -1 | tr -d ' ')
-  say "stored $(gib "$stored"); image capacity $(gib "$cap") (reserved on disk: $(gib "$held")); free outside the image $(gib "$avail")"
-  our_overlays | sed 's/^/  /'
-}
+    @classmethod
+    def from_env(cls, env: dict[str, str] | None = None) -> Config:
+        env = dict(os.environ if env is None else env)
+        return cls(
+            img=os.path.realpath(env.get("ZSTD_OVERLAY_IMG", "/var/lib/zstd-overlay/disk.img")),
+            mnt=os.path.realpath(env.get("ZSTD_OVERLAY_MNT", "/mnt/zstd-overlay")),
+            reserve=int(env.get("ZSTD_OVERLAY_RESERVE_MB", "4096")) * MiB,
+            home=env.get("HOME", "/root"),
+            project=env.get("CLAUDE_PROJECT_DIR", ""),
+        )
 
-cmd_doctor() {
-  cmd_status
-  local d changed
-  while IFS= read -r d; do
-    [ -n "$d" ] || continue
-    if is_mounted "$d"; then echo "  ok        $d"; continue; fi
-    if ! guard "$d" >/dev/null; then echo "  refused   $d ($(guard "$d"))"; continue; fi
-    if mountpoint -q "$MNT"; then changed=$(changed_since_mount "$d" | wc -l); else changed=0; fi
-    if [ "$changed" -gt 0 ]; then echo "  CHANGED   $d ($changed paths changed while unmounted; see: zstd-overlay up $d)"
-    else echo "  unmounted $d"; fi
-  done < <(default_dirs)
-}
 
-json_str() { local s=$1; s=${s//\\/\\\\}; s=${s//\"/\\\"}; s=${s//$'\t'/\\t}; s=${s//$'\r'/}; s=${s//$'\n'/\\n}; printf '"%s"' "$s"; }
+# --- pure logic (unit-tested) -------------------------------------------------
 
-# `up --hook`, the SessionStart hook: Claude Code reads a hook's stdout only when
-# it exits 0, so this always exits 0 and, when a folder was refused, answers in
-# JSON: a warning the user sees (systemMessage) and the details for Claude
-# (additionalContext). A hard failure still exits 2 with its message on stderr,
-# which Claude Code shows the user.
-hook_up() {
-  local out; out=$(mktemp)
-  cmd_up "$@" > "$out"
-  if [ "$REFUSED" = 0 ]; then cat "$out"; rm -f "$out"; return 0; fi
-  local ctx; ctx="$(cat "$out")
-Some folders were left on the normal disk, uncompressed, so that nothing is hidden. Tell the user which ones and why. Run \`zstd-overlay up --merge DIR\` only after the user has looked at the listed files and agreed."
-  printf '{"systemMessage": %s, "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": %s}}\n' \
-    "$(json_str "zstd-overlay: $(grep -c 'NOT MOUNTED\|refused:' "$out") folder(s) not compressed this session; details: zstd-overlay doctor")" \
-    "$(json_str "$ctx")"
-  rm -f "$out"
-}
 
-[ "$(id -u)" = 0 ] || case "${1:-}" in "" | -h | --help | help) ;; *) die "needs root (it mounts)";; esac
+def unescape_mountinfo(s: str) -> str:
+    """/proc/self/mountinfo writes space, tab, newline and backslash as octal escapes."""
+    out, i = [], 0
+    while i < len(s):
+        if s[i] == "\\" and i + 3 < len(s) and s[i + 1 : i + 4].isdigit():
+            out.append(chr(int(s[i + 1 : i + 4], 8)))
+            i += 4
+        else:
+            out.append(s[i])
+            i += 1
+    return "".join(out)
 
-case "${1:-}" in
-  "" | -h | --help | help) usage ;;
-  up | migrate | status | doctor | install)
-    cmd=$1; shift
-    exec 9> "$LOCK"; flock -w 120 9 || die "another zstd-overlay is running"
-    if [ "$cmd" = up ] && [ "${1:-}" = --hook ]; then shift; hook_up "$@"; exit 0; fi
-    "cmd_$cmd" "$@"
-    [ "$REFUSED" = 0 ] || exit 3 ;;
-  *) die "unknown command: $1 (see --help)" ;;
-esac
-exit 0
 
-# An empty btrfs filesystem (100 GiB sparse, 4 MiB on disk; `up` resizes it to
-# fit the real disk). Made with btrfs-progs 6.6.3:
+@dataclass
+class Mount:
+    target: str
+    fstype: str
+    source: str
+    options: str  # mount options + super options, comma-joined
+
+
+def parse_mountinfo(text: str) -> list[Mount]:
+    mounts = []
+    for line in text.splitlines():
+        if " - " not in line:
+            continue
+        left, right = line.split(" - ", 1)
+        lf, rf = left.split(), right.split()
+        if len(lf) < 6 or len(rf) < 3:
+            continue
+        mounts.append(Mount(unescape_mountinfo(lf[4]), rf[0], unescape_mountinfo(rf[1]), f"{lf[5]},{rf[2]}"))
+    return mounts
+
+
+def our_overlays(mounts: list[Mount], mnt: str) -> list[str]:
+    marker = f"upperdir={mnt}/upper/"
+    return [m.target for m in mounts if m.fstype == "overlay" and marker in m.options]
+
+
+def inside(path: str, parent: str) -> bool:
+    """path is parent or below it."""
+    return path == parent or path.startswith(parent.rstrip("/") + "/")
+
+
+def guard(path: str, cfg: Config, mounted: list[str]) -> str | None:
+    """Why `path` must not be mounted, or None."""
+    if path in SYSTEM or path.startswith("/opt/claude-code") or inside(path, "/var/lib/dpkg"):
+        return "a system folder"
+    if inside(path, "/usr") and not path.startswith("/usr/local/"):
+        return "a system folder"
+    claude = os.path.join(cfg.home, ".claude")
+    for p in (claude, cfg.mnt, cfg.img):
+        if inside(p, path):
+            return f"it holds {p}"
+    for p in (claude, cfg.mnt):
+        if inside(path, p):
+            return f"it is inside {p}"
+    for o in mounted:
+        if o == path:
+            continue
+        if inside(path, o):
+            return f"it is inside {o}, which is already mounted"
+        if inside(o, path):
+            return f"it holds {o}, which is already mounted"
+    return None
+
+
+def resolve(dirs: list[str]) -> tuple[list[str], list[str]]:
+    """Absolute, deduplicated; a folder listed inside another listed one is refused."""
+    absolute = list(dict.fromkeys(os.path.realpath(d) for d in dirs if d))
+    keep, refused = [], []
+    for d in absolute:
+        outer = next((o for o in absolute if o != d and inside(d, o)), None)
+        if outer:
+            refused.append(f"refused: {d} (it is inside {outer}, also listed)")
+        else:
+            keep.append(d)
+    return keep, refused
+
+
+def default_dirs(cfg: Config) -> list[str]:
+    dirs = [cfg.project] if cfg.project else []
+    dirs += [os.path.join(cfg.home, d) for d in (".cache", ".local/share", ".local/bin", ".npm")]
+    dirs += [os.path.join(cfg.home, d) for d in DEFAULT_TOOL_DIRS if os.path.isdir(os.path.join(cfg.home, d))]
+    return dirs
+
+
+def target_capacity(held: int, avail: int, reserve: int) -> int:
+    """What the image may take: its own blocks + free disk - reserve, whole MiB, at least MIN_CAPACITY."""
+    return max(MIN_CAPACITY, (held + avail - reserve) // MiB * MiB)
+
+
+def shrink_steps(cur: int, target: int, step: int = SHRINK_STEP) -> list[int]:
+    """Sizes to resize through on the way down. One big shrink must move every block group
+    above the new end at once and often fails with ENOSPC; 256 MiB steps succeed (measured)."""
+    sizes, size = [], cur
+    while size > target:
+        size = max(target, size - step)
+        sizes.append(size)
+    return sizes
+
+
+def changed_since(root: str, stamp_ns: int) -> list[str]:
+    """Paths under root (one filesystem) whose ctime is newer than stamp_ns. ctime, not mtime:
+    `cp -a` and `tar -p` can set mtime back, nothing sets ctime back. A delete changes the
+    folder's ctime, so deletions show up as their folder."""
+    dev = os.lstat(root).st_dev
+    found, stack = [], [root]
+    while stack:
+        d = stack.pop()
+        try:
+            st = os.lstat(d)
+            if st.st_ctime_ns > stamp_ns:
+                found.append(d)
+            with os.scandir(d) as it:
+                entries = list(it)
+        except OSError:
+            continue
+        for e in entries:
+            try:
+                st = e.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if e.is_dir(follow_symlinks=False):
+                if st.st_dev == dev:
+                    stack.append(e.path)
+            elif st.st_ctime_ns > stamp_ns:
+                found.append(e.path)
+    return sorted(found)
+
+
+def tree_sig(root: str) -> tuple[int, int]:
+    """(entries, bytes in regular files): what `migrate` compares before deleting."""
+    entries, size = 1, 0
+    for d, dirs, files in os.walk(root):
+        entries += len(dirs) + len(files)
+        for f in files:
+            st = os.lstat(os.path.join(d, f))
+            if not os.path.islink(os.path.join(d, f)):
+                size += st.st_size
+    return entries, size
+
+
+def merge_hook(settings: dict, command: str = HOOK_COMMAND) -> dict:
+    """settings with one SessionStart hook running `command`, replacing earlier zstd-overlay hooks."""
+    hooks = settings.setdefault("hooks", {})
+    entries = hooks.setdefault("SessionStart", [])
+
+    def ours(entry: dict) -> bool:
+        return any(str(h.get("command", "")).startswith(str(INSTALL_PATH) + " ") for h in entry.get("hooks", []))
+
+    entries[:] = [e for e in entries if not ours(e)]
+    entries.append({"matcher": "startup|resume", "hooks": [{"type": "command", "command": command, "timeout": 600}]})
+    return settings
+
+
+def hook_output(lines: list[str], refused: int) -> str:
+    """What `up --hook` prints. Claude Code reads a SessionStart hook's stdout only on exit 0:
+    plain text becomes context for Claude; JSON can also warn the user."""
+    text = "\n".join(lines)
+    if not refused:
+        return text
+    context = (
+        text + "\nSome folders were left on the normal disk, uncompressed, so that nothing is hidden. "
+        "Tell the user which ones and why. Run `zstd-overlay up --merge DIR` only after the user "
+        "has looked at the listed files and agreed."
+    )
+    return json.dumps(
+        {
+            "systemMessage": (
+                f"zstd-overlay: {refused} folder(s) not compressed this session; details: zstd-overlay doctor"
+            ),
+            "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": context},
+        }
+    )
+
+
+# --- the machine ----------------------------------------------------------------
+
+
+def run(*cmd: str) -> None:
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise Stop(f"{' '.join(cmd)}: {r.stderr.strip() or f'exit {r.returncode}'}")
+
+
+def mounts_now() -> list[Mount]:
+    return parse_mountinfo(Path("/proc/self/mountinfo").read_text())
+
+
+def mount_at(target: str) -> Mount | None:
+    found = [m for m in mounts_now() if m.target == target]
+    return found[-1] if found else None
+
+
+def backing_file(loopdev: str) -> str:
+    p = Path(f"/sys/block/{os.path.basename(loopdev)}/loop/backing_file")
+    return p.read_text().strip() if p.exists() else ""
+
+
+def fs_size(path: str) -> int:
+    s = os.statvfs(path)
+    return s.f_blocks * s.f_frsize
+
+
+def fs_avail(path: str) -> int:
+    s = os.statvfs(path)
+    return s.f_bavail * s.f_frsize
+
+
+def allocated(path: str) -> int:
+    return os.stat(path).st_blocks * 512
+
+
+def btrfs_resize(mnt: str, size: int) -> str | None:
+    """None on success, the error otherwise. BTRFS_IOC_RESIZE needs no btrfs-progs."""
+    arg = bytearray(struct.pack("q4088s", 0, str(size).encode()))
+    fd = os.open(mnt, os.O_RDONLY)
+    try:
+        fcntl.ioctl(fd, BTRFS_IOC_RESIZE, arg)
+        return None
+    except OSError as e:
+        return e.strerror or str(e)
+    finally:
+        os.close(fd)
+
+
+def loop_refresh(dev: str) -> None:
+    fd = os.open(dev, os.O_RDONLY)
+    try:
+        fcntl.ioctl(fd, LOOP_SET_CAPACITY, 0)
+    finally:
+        os.close(fd)
+
+
+def reserve_blocks(img: str, size: int) -> None:
+    fd = os.open(img, os.O_WRONLY)
+    try:
+        os.posix_fallocate(fd, 0, size)
+    finally:
+        os.close(fd)
+
+
+@dataclass
+class Session:
+    cfg: Config
+    refused: int = 0
+    lines: list[str] = field(default_factory=list)
+    quiet: bool = False
+
+    def say(self, msg: str) -> None:
+        self.lines.append(f"zstd-overlay: {msg}")
+        if not self.quiet:
+            say(msg)
+
+    def refuse(self, msg: str) -> None:
+        self.refused += 1
+        self.say(msg)
+
+    # --- the image ---
+
+    def mount_image(self) -> None:
+        cfg = self.cfg
+        m = mount_at(cfg.mnt)
+        if m:
+            back = backing_file(m.source)
+            if back != cfg.img:
+                raise Stop(f"{cfg.mnt} is mounted from {back or m.source}, not {cfg.img}")
+            if m.options.split(",")[0] == "ro":
+                raise Stop(
+                    f"the image went read-only (see dmesg). Save what you need, unmount the folders "
+                    f"and {cfg.mnt}, then run up again"
+                )
+            self.fit_image()
+            return
+        os.makedirs(os.path.dirname(cfg.img), exist_ok=True)
+        os.makedirs(cfg.mnt, exist_ok=True)
+        if not os.path.exists(cfg.img):
+            with tempfile.TemporaryDirectory(dir=os.path.dirname(cfg.img), prefix=".new.") as tmp:
+                with tarfile.open(fileobj=io.BytesIO(base64.b64decode(BLOB))) as t:
+                    member = t.getmember("disk.img")
+                    if hasattr(tarfile, "data_filter"):
+                        t.extract(member, tmp, filter="data")
+                    else:  # Python 3.11 before 3.11.4
+                        t.extract(member, tmp)
+                os.replace(os.path.join(tmp, "disk.img"), cfg.img)
+        run("mount", "-o", f"loop,{OPTS}", cfg.img, cfg.mnt)
+        for d in ("upper", "work", "stamps"):
+            os.makedirs(os.path.join(cfg.mnt, d), exist_ok=True)
+        self.fit_image()
+
+    def fit_image(self) -> None:
+        """Capacity = the image's own blocks + free disk - reserve, all of it allocated, so the
+        blocks are the image's before btrfs writes to them. Grows when the disk has room;
+        shrinks when writes outside ate into the reserve."""
+        cfg = self.cfg
+        m = mount_at(cfg.mnt)
+        assert m is not None
+        dev, cur = m.source, fs_size(cfg.mnt)
+        avail = fs_avail(os.path.dirname(cfg.img))
+        target = target_capacity(allocated(cfg.img), avail, cfg.reserve)
+        if abs(target - cur) >= SHRINK_STEP:
+            if target > cur:
+                try:
+                    reserve_blocks(cfg.img, target)
+                except OSError:
+                    self.say("warning: no room to grow the image")
+                    return
+                loop_refresh(dev)
+                if err := btrfs_resize(cfg.mnt, target):
+                    self.say(f"warning: could not grow the image to {gib(target)} ({err})")
+            else:
+                size, err = cur, None
+                for step in shrink_steps(cur, target):
+                    err = btrfs_resize(cfg.mnt, step)
+                    if err:  # btrfs frees a deleted file's blocks only after a commit
+                        os.sync()
+                        time.sleep(2)
+                        err = btrfs_resize(cfg.mnt, step)
+                    if err:
+                        break
+                    size = step
+                if size < cur:
+                    os.truncate(cfg.img, size)
+                    loop_refresh(dev)
+                if size > target:
+                    self.say(
+                        f"warning: only {gib(avail)} free outside the image (reserve {gib(cfg.reserve)}); "
+                        f"the image gave back {gib(cur - size)} of {gib(cur - target)} ({err})"
+                    )
+        cur = fs_size(cfg.mnt)
+        if allocated(cfg.img) < cur:  # a fresh (sparse) image: claim its blocks now
+            try:
+                reserve_blocks(cfg.img, cur)
+            except OSError:
+                self.say("warning: could not reserve the image's space; writes outside could break it")
+
+    # --- folders ---
+
+    def stamp(self, path: str) -> str:
+        return os.path.join(self.cfg.mnt, "stamps", key_of(path))
+
+    def changed(self, path: str) -> list[str]:
+        stamp = self.stamp(path)
+        if not os.path.exists(stamp) or not os.path.isdir(path):
+            return []
+        return changed_since(path, os.stat(stamp).st_mtime_ns)
+
+    def mount_dir(self, path: str, merge: bool = False) -> bool:
+        cfg = self.cfg
+        mounted = our_overlays(mounts_now(), cfg.mnt)
+        if path in mounted:
+            return True
+        if why := guard(path, cfg, mounted):
+            self.refuse(f"refused: {path} ({why})")
+            return False
+        os.makedirs(path, exist_ok=True)
+        changed = self.changed(path)
+        if changed and not merge:
+            self.refuse(f"NOT MOUNTED: {path} changed while it was not mounted; mounting would hide these:")
+            for p in changed[:20]:
+                self.say(f"    {p}")
+            if len(changed) > 20:
+                self.say(f"    ... and {len(changed) - 20} more")
+            self.say(f"  it stays on the normal disk. Keep those changes: zstd-overlay up --merge {path}")
+            return False
+        key = key_of(path)
+        aside = None
+        if changed:  # --merge: set the changed files aside, mount, put them back on top
+            aside = tempfile.mkdtemp(dir=cfg.mnt, prefix="merge.")
+            for p in changed:
+                if not os.path.isdir(p) or os.path.islink(p):
+                    rel = os.path.relpath(p, path)
+                    os.makedirs(os.path.join(aside, os.path.dirname(rel)), exist_ok=True)
+                    copy_entry(p, os.path.join(aside, rel))
+        for d in ("upper", "work"):
+            os.makedirs(os.path.join(cfg.mnt, d, key), exist_ok=True)
+        run(
+            "mount", "-t", "overlay", "overlay", "-o",
+            f"lowerdir={path},upperdir={cfg.mnt}/upper/{key},workdir={cfg.mnt}/work/{key}", path,
+        )  # fmt: skip
+        if aside:
+            run("cp", "-a", f"{aside}/.", f"{path}/")
+            shutil.rmtree(aside)
+            self.say(f"merged {len(changed)} changed paths into {path}")
+        Path(self.stamp(path)).touch()
+        self.say(f"compressed: {path}")
+        self.stale_processes(path)
+        return True
+
+    def stale_processes(self, path: str) -> None:
+        """A process that was already inside `path` keeps the old folder as its working
+        directory: what it writes by relative path goes there, under the mount. Claude Code
+        itself is not one of them: it resolves its working directory by path for every
+        command, so commands it starts after the mount see the image (checked in a session
+        on 2026-11-02)."""
+        lower_dev = os.stat(os.path.dirname(path)).st_dev
+        names = []
+        for pid in filter(str.isdigit, os.listdir("/proc")):
+            if pid == str(os.getpid()):
+                continue
+            try:
+                if os.readlink(f"/proc/{pid}/exe").endswith("/claude"):
+                    continue
+                cwd = os.readlink(f"/proc/{pid}/cwd")
+                if not inside(cwd, path) or os.stat(f"/proc/{pid}/cwd").st_dev != lower_dev:
+                    continue
+                cmd = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+            except OSError:
+                continue
+            names.append(f"{pid}:{cmd.strip()[:40]}")
+        if names:
+            more = ", ..." if len(names) > 4 else ""
+            self.say(f"  note: {len(names)} process(es) started earlier still work in the old {path}; what they")
+            self.say(f"  write by relative path goes under the mount. Restart them if they write there: "
+                     f"{', '.join(names[:4])}{more}")  # fmt: skip
+
+    # --- commands ---
+
+    def up(self, dirs: list[str], merge: bool = False) -> None:
+        if merge and not dirs:
+            raise Stop("--merge needs the folders to merge")
+        self.mount_image()
+        keep, refused = resolve(dirs or default_dirs(self.cfg))
+        for r in refused:
+            self.refuse(r)
+        for d in keep:
+            self.mount_dir(d, merge)
+
+    def migrate(self, dirs: list[str]) -> None:
+        if not dirs:
+            raise Stop("migrate needs folders")
+        cfg = self.cfg
+        self.mount_image()
+        keep, refused = resolve(dirs)
+        for r in refused:
+            self.refuse(r)
+        for d in keep:
+            if d == os.path.realpath(cfg.project or "/nonexistent") or os.path.exists(os.path.join(d, ".git")):
+                self.refuse(f"refused: {d} is a repository; repositories are mounted, never migrated")
+                continue
+            if d in our_overlays(mounts_now(), cfg.mnt):
+                self.say(f"skipped: {d} is mounted already; migrate runs before the first mount of a session")
+                continue
+            if not os.path.isdir(d):
+                self.say(f"skipped: {d} does not exist")
+                continue
+            if not self.mount_dir(d):
+                continue
+            key = key_of(d)
+            new = os.path.join(cfg.mnt, "upper", key + ".migrating")
+            shutil.rmtree(new, ignore_errors=True)
+            os.makedirs(new)
+            # Copy the merged view: it already hides what was deleted and shows the newest version.
+            run("cp", "-a", "--reflink=auto", f"{d}/.", f"{new}/")
+            before, after = tree_sig(d), tree_sig(new)
+            if before != after:
+                shutil.rmtree(new)
+                self.refuse(f"migrate aborted: the copy of {d} has {after} (entries, bytes), expected {before}; "
+                            "nothing changed")  # fmt: skip
+                continue
+            run("umount", d)
+            old = d + ".zstd-overlay-old"
+            os.rename(d, old)
+            st = os.stat(old)
+            os.mkdir(d)
+            os.chmod(d, st.st_mode & 0o7777)
+            os.chown(d, st.st_uid, st.st_gid)
+            shutil.rmtree(os.path.join(cfg.mnt, "upper", key))
+            shutil.rmtree(os.path.join(cfg.mnt, "work", key), ignore_errors=True)
+            os.rename(new, os.path.join(cfg.mnt, "upper", key))
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(self.stamp(d))
+            if self.mount_dir(d) and tree_sig(d) == before:
+                shutil.rmtree(old)
+                self.say(f"migrated: {d} ({gib(before[1])} now in the image)")
+            else:
+                self.refuse(f"migrate check failed: {old} kept; nothing deleted")
+
+    def install(self) -> None:
+        settings = Path(self.cfg.home, ".claude", "settings.json")
+        me = Path(__file__).resolve()
+        if me != INSTALL_PATH:
+            shutil.copyfile(me, INSTALL_PATH)
+            INSTALL_PATH.chmod(0o755)
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            current = json.loads(settings.read_text()) if settings.exists() and settings.stat().st_size else {}
+        except json.JSONDecodeError as e:
+            raise Stop(f"{settings} is not valid JSON ({e}); left unchanged") from None
+        if not isinstance(current, dict):
+            raise Stop(f"{settings} is not a JSON object; left unchanged")
+        fd, tmp = tempfile.mkstemp(dir=settings.parent, prefix="settings.json.")
+        with os.fdopen(fd, "w") as f:
+            json.dump(merge_hook(current), f, indent=2)
+            f.write("\n")
+        os.replace(tmp, settings)
+        self.say(f"installed {INSTALL_PATH} and a SessionStart hook in {settings}")
+        self.say("the image is created at the first session start, not now")
+
+    def status(self) -> None:
+        cfg = self.cfg
+        if not mount_at(cfg.mnt):
+            self.say("image not mounted (run: zstd-overlay up)")
+            return
+        stored = sum(
+            os.lstat(os.path.join(d, f)).st_size for d, _, fs in os.walk(os.path.join(cfg.mnt, "upper")) for f in fs
+        )
+        free = fs_avail(os.path.dirname(cfg.img))
+        self.say(
+            f"stored {gib(stored)}; image capacity {gib(fs_size(cfg.mnt))} "
+            f"(reserved on disk: {gib(allocated(cfg.img))}); free outside the image {gib(free)}"
+        )
+        for o in our_overlays(mounts_now(), cfg.mnt):
+            print(f"  {o}")
+
+    def doctor(self) -> None:
+        self.status()
+        image = mount_at(self.cfg.mnt) is not None
+        mounted = our_overlays(mounts_now(), self.cfg.mnt)
+        for d in default_dirs(self.cfg):
+            d = os.path.realpath(d)
+            if d in mounted:
+                print(f"  ok        {d}")
+            elif why := guard(d, self.cfg, mounted):
+                print(f"  refused   {d} ({why})")
+            elif image and (n := len(self.changed(d))):
+                print(f"  CHANGED   {d} ({n} paths changed while unmounted; see: zstd-overlay up {d})")
+            else:
+                print(f"  unmounted {d}")
+
+
+def copy_entry(src: str, dst: str) -> None:
+    """Copy one file or symlink with its mode, times and owner."""
+    st = os.lstat(src)
+    shutil.copy2(src, dst, follow_symlinks=False)
+    os.lchown(dst, st.st_uid, st.st_gid)
+
+
+@contextlib.contextmanager
+def locked(path: str = LOCK_PATH, wait: float = 120):
+    with open(path, "w") as f:
+        deadline = time.monotonic() + wait
+        while True:
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() > deadline:
+                    raise Stop("another zstd-overlay is running") from None
+                time.sleep(0.2)
+        yield
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = list(sys.argv[1:] if argv is None else argv)
+    cmd = args.pop(0) if args else "help"
+    if cmd in ("help", "-h", "--help"):
+        print(__doc__.strip())
+        return 0
+    if cmd not in ("up", "migrate", "install", "status", "doctor"):
+        print(f"zstd-overlay: unknown command: {cmd} (see --help)", file=sys.stderr)
+        return 2
+    if os.geteuid() != 0:
+        print("zstd-overlay: needs root (it mounts)", file=sys.stderr)
+        return 2
+    hook = merge = False
+    while args and args[0] in ("--hook", "--merge"):
+        hook |= args[0] == "--hook"
+        merge |= args[0] == "--merge"
+        args.pop(0)
+    s = Session(Config.from_env(), quiet=hook)
+    try:
+        with locked():
+            if cmd == "up":
+                s.up(args, merge)
+            elif cmd == "migrate":
+                s.migrate(args)
+            else:
+                getattr(s, cmd)()
+    except Stop as e:
+        print(f"zstd-overlay: {e}", file=sys.stderr)
+        return 2
+    if hook:
+        print(hook_output(s.lines, s.refused))
+        return 0
+    return 3 if s.refused else 0
+
+
+# An empty btrfs filesystem (100 GiB sparse, 4 MiB on disk; `up` resizes it to fit
+# the real disk). Made with btrfs-progs 6.6.3:
 #   truncate -s 100G disk.img && mkfs.btrfs -m single -L zstd-overlay disk.img
 #   tar -Sczf - disk.img | base64 -w 76
-# The kernel mounts btrfs but cannot create one, and mkfs.btrfs is not in the
-# base image, so the empty filesystem ships here.
-__ZSTD_OVERLAY_BLOB__
+# The kernel mounts btrfs but cannot create one, and mkfs.btrfs is not in the base
+# image, so the empty filesystem ships here.
+BLOB = """
 H4sIAAAAAAAAA+3dfYhdZX4H8OfOSyZvLRMprYEtKOsuuJIhCTHqrpk5EW3NliyTyW4LUhLiJlnf
 1oAmorJsL9UKJbj9I1oqZbdpQbe2Ilnzh+v+oReLky2Im+6iLMiyLQbUP8QVLcFKm86cc54z52Xu
 vZO31Uk+nzD3vHyf5znPOffM5P7zO3f37ffeOXb7t78VzqO1MzZu2JAuZ5SX69duvDpdX3f1+mvW
@@ -505,3 +845,7 @@ AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAALBL/D14G
 pEYAWEMA
+"""
+
+if __name__ == "__main__":
+    sys.exit(main())

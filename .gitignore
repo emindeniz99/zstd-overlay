@@ -1,1 +1,4 @@
 /tests/.last-run.log
+.venv/
+__pycache__/
+.coverage*

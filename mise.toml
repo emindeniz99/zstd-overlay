@@ -1,0 +1,35 @@
+[tools]
+uv = "0.13.5"
+
+[settings]
+idiomatic_version_file_enable_tools = ["python"]
+
+# Every gate on the development Python (.python-version), unit tests only. The
+# scenarios that mount things run in Docker as root: `sudo tests/run.sh`.
+[tasks.check]
+env = { UV_LOCKED = "1" }
+run = '''
+set -eu
+test "$(uv --version | cut -d' ' -f2)" = "$(mise current uv)" || { echo "uv on PATH is $(command -v uv), not mise's $(mise current uv); see mise doctor" >&2; exit 1; }
+uv sync
+uv format --check --version "$(uv run ruff --version | cut -d' ' -f2)"
+uv run ruff check
+uv run ty check --error-on-warning
+rm -f .coverage .coverage.*
+uv run coverage run -m pytest
+uv run coverage report
+'''
+
+# The unit tests on every supported Python older than the development one.
+[tasks.matrix]
+env = { UV_LOCKED = "1" }
+run = '''
+set -eu
+for v in 3.11 3.12 3.13 3.14; do
+  echo "== Python $v"
+  uv run --isolated --python "$v" pytest -q
+done
+'''
+
+[tasks.format]
+run = 'uv format --version "$(uv run --locked ruff --version | cut -d" " -f2)"'

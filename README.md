@@ -4,13 +4,13 @@
 
 - **Problem:** a Claude Code cloud session has about 30 GB of disk. A repository with nine languages (toolchains, dependency caches, build output) fills it.
 - **Success:** the same work fits with room to spare. The full toolchain of `apple-purchase-receipt-verifier` takes 40% or less of its normal size. After a VM restore one command brings everything back, and no write is lost or hidden. Every scenario in `tests/run.sh` passes.
-- **Out of scope:** `/usr`, `/opt` and other system folders; macOS (see [`apfs-compress`](../apfs-compress)); non-root environments; deduplication; any tool the base image lacks.
+- **Out of scope:** `/usr`, `/opt` and other system folders; macOS (see [`apfs-compress`](../apfs-compress)); non-root environments; machines without Python 3.11+; deduplication; any tool the base image lacks.
 
 ## What it does
 
 `zstd-overlay` puts the folders you name on top of a zstd-compressed btrfs image. Writes under those folders land in the image, compressed. What the folders held before stays where it was and stays readable. Programs see plain files, so pnpm, cargo, uv, mise, dotnet and git need no flags.
 
-It uses only what the kernel and an Ubuntu base image already have: btrfs, overlayfs, loop devices, `fallocate`, and perl for one kernel call. The kernel can mount btrfs but cannot create one, and `mkfs.btrfs` is not installed, so an empty btrfs filesystem (7.5 KB compressed) ships at the end of the script.
+It is one Python 3.11+ file using only the standard library, and it uses only what the kernel already has: btrfs, overlayfs and loop devices. It resizes btrfs and reserves disk blocks with kernel calls (`BTRFS_IOC_RESIZE`, `fallocate`), so it needs no btrfs-progs. The kernel can mount btrfs but cannot create one, and `mkfs.btrfs` is not installed, so an empty btrfs filesystem (7.5 KB compressed) ships at the end of the file. A cloud session has Python 3.13; a machine without `python3` gets an error from `env` and nothing is mounted.
 
 | Measured in a cloud session (2026-11-02) | Normal size | In the image |
 |---|---|---|
@@ -53,7 +53,7 @@ Run `install` from the environment's setup script. This repository is private, s
 cat > /tmp/zstd-overlay <<'ZSTD_OVERLAY_EOF'
 # ...the whole file...
 ZSTD_OVERLAY_EOF
-bash /tmp/zstd-overlay install
+python3 /tmp/zstd-overlay install
 ```
 
 `install` creates no image. The image appears at the first session start, after the environment cache snapshot, so the snapshot holds a few kilobytes instead of a disk image. Not verified on the cloud platform yet: that the snapshot keeps `~/.claude/settings.json`, and that a restored VM fires the hook with `resume`. Run `zstd-overlay doctor` in the first session to check.
@@ -78,10 +78,16 @@ In a session that started before the hook existed, run `zstd-overlay up` once.
 
 ## Tests
 
+Two layers. The unit tests cover every decision that needs no kernel: what is refused, what counts as changed while unmounted, sizing, the settings merge, the hook's output. The scenarios cover what the kernel does.
+
 ```bash
+mise run check      # format, ruff, ty, unit tests with coverage (Python from .python-version)
+mise run matrix     # unit tests on Python 3.11, 3.12, 3.13, 3.14
 sudo ZO_CA_BUNDLE=/path/to/ca.pem tests/run.sh       # every scenario
 sudo tests/run.sh 3 6                                # some of them
 ```
+
+Coverage from the unit tests alone is about 42%; the rest is mounting, resizing and copying, which only the scenarios run.
 
 Each scenario runs in its own privileged Ubuntu 24.04 container. The containers share the host kernel, so they test the same btrfs, overlayfs and loop code a session uses, and `docker restart` reproduces a VM restore: processes and mounts go, files stay. Firecracker could not run here: the session VM exposes no `/dev/kvm`.
 
@@ -96,7 +102,7 @@ Each scenario runs in its own privileged Ubuntu 24.04 container. The containers 
 | 7 | deleted space is reused inside the image |
 | 8 | reflinks, git commit/branch/stash/gc/fsck |
 | 9 | mise installs node 24 + pnpm 12 and uv + Python; installs land in the image |
-| 10 | `install`: merges into existing settings, once; invalid JSON untouched; python3 without jq; perl-only base |
+| 10 | `install`: merges into existing settings, once; invalid JSON untouched; no jq needed; a base without python3 stops cleanly |
 | 11 | the real Claude Code binary runs the hook |
 | 12 | a snapshot after `install` stays small |
 | 13 | concurrent runs, nesting, system folders, non-root |

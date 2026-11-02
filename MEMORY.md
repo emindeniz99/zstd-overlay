@@ -2,7 +2,7 @@
 
 ## Now
 
-- 2026-11-02: first version done: `zstd-overlay` (up, migrate, install, status, doctor) and `tests/run.sh` (13 Docker scenarios, all passing). Not yet used through a real cloud environment's setup script; the first session that does should run `zstd-overlay doctor` and record whether the hook fired on `resume` and the snapshot kept `~/.claude/settings.json`.
+- 2026-11-02: Python version: `zstd-overlay` (up, migrate, install, status, doctor), 44 unit tests (`mise run check`, `mise run matrix`) and `tests/run.sh` (13 Docker scenarios). Not yet used through a real cloud environment's setup script; the first session that does should run `zstd-overlay doctor` and record whether the hook fired on `resume` and the snapshot kept `~/.claude/settings.json`.
 - Next: graduate to a public repo so setup scripts can `curl` it (this repo is private).
 
 ## Decisions
@@ -11,7 +11,8 @@
 - 2026-11-02: the image is preallocated (`fallocate`, `nodiscard`) and leaves 4 GiB outside: a sparse image turned read-only when the disk filled from outside.
 - 2026-11-02: a folder written while unmounted is refused, not merged (owner's choice, "B"); `--merge` exists for after a look.
 - 2026-11-02: `install` never creates the image: a snapshot of a container with a 1 GiB reserved image grew by 1 GiB (scenario 12).
-- 2026-11-02: the empty btrfs ships as a base64 blob at the end of the script: the kernel cannot format btrfs and `mkfs.btrfs` is not in the base image; resizing uses `BTRFS_IOC_RESIZE` through perl.
+- 2026-11-02: the empty btrfs ships as a base64 blob at the end of the script: the kernel cannot format btrfs and `mkfs.btrfs` is not in the base image; resizing uses `BTRFS_IOC_RESIZE` from Python's `fcntl.ioctl`.
+- 2026-11-02: rewritten from bash to Python 3.11+ stdlib, one file (owner: "a well-tested tool deserves a real language"): unit tests for the logic, no perl/jq fallbacks; a cloud session has Python 3.13. The bash version (0253ed0) passed all 13 scenarios first; the scenarios are language-independent and gate the rewrite.
 
 ## Learnings
 
@@ -25,4 +26,5 @@
 
 ## Done
 
+- 2026-11-02: rewritten in Python with unit tests.
 - 2026-11-02: project created; script, harness, README, evidence.

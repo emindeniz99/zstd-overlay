@@ -17,7 +17,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 PROJ=$(dirname "$HERE")
 BASE=${ZO_BASE_IMAGE:-mirror.gcr.io/library/ubuntu:24.04}
 CLOUD=zstd-overlay-test:cloud   # the tools a cloud session has: git curl jq python3
-BARE=zstd-overlay-test:bare     # nothing added: perl, coreutils, util-linux only
+BARE=zstd-overlay-test:bare     # nothing added: no python3
 CA=${ZO_CA_BUNDLE:-}
 CLAUDE_BIN=${ZO_CLAUDE_BIN:-$(command -v claude || true)}
 [ -n "$CLAUDE_BIN" ] && CLAUDE_BIN=$(readlink -f "$CLAUDE_BIN")
@@ -293,14 +293,12 @@ s10() {
   out=$(x "$ZO install 2>&1; echo exit=\$?; cat /root/.claude/settings.json")
   check "invalid JSON: exit 2, file untouched" has "$out" $'exit=2\n{broken'
   out=$(x "rm -f /root/.claude/settings.json; PATH=/usr/sbin:/usr/bin:/sbin:/bin; mv /usr/bin/jq /usr/bin/jq.off; $ZO install; echo exit=\$?; mv /usr/bin/jq.off /usr/bin/jq; python3 -c 'import json;print(json.load(open(\"/root/.claude/settings.json\"))[\"hooks\"][\"SessionStart\"][0][\"matcher\"])'")
-  check "without jq, python3 does the merge" has "$out" "startup|resume"
+  check "install needs no jq" has "$out" "startup|resume"
   stop
   start s10b "$BARE"
-  out=$(x "$ZO install 2>&1; echo exit=\$?")
-  check "bare image (no jq, no python): install explains and exits 2" has "$out" "need jq or python3"
-  out=$(x "$ZO up; echo exit=\$?; df -B1M --output=size /mnt/zstd-overlay | tail -1")
-  check "bare image: up works with perl alone" has "$out" "exit=0"
-  check "bare image: capacity was resized (< 100 GiB)" lt "$(printf '%s\n' "$out" | tail -1)" 102000
+  out=$(x "$ZO up 2>&1; echo exit=\$?")
+  check "bare image without python3: stops at once and names python3" has "$out" "python3"
+  check "bare image: nothing was mounted" eq "$(x 'findmnt -rn -t overlay,btrfs | wc -l')" 0
   done_scenario
 }
 
