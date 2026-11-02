@@ -1,0 +1,507 @@
+#!/bin/bash
+# zstd-overlay: transparent zstd compression for folders on a Linux VM, built
+# for Claude Code cloud sessions (30 GB disk, root, kernel with btrfs and
+# overlayfs). Installs nothing: an empty btrfs image ships at the end of this
+# file, and the kernel does the rest.
+#
+# Every write under a mounted folder lands in a compressed btrfs image. What the
+# folder held before stays where it was and stays readable. Programs see plain
+# files; pnpm, cargo, uv, dotnet and the rest need no flags.
+#
+# Usage:
+#   zstd-overlay up [DIR...]         mount DIRs (default list when none is given)
+#   zstd-overlay up --merge DIR...   mount DIR although it changed while unmounted;
+#                                    the changed files win (look first: `doctor`)
+#   zstd-overlay up --hook [...]     as up, for a SessionStart hook: exits 0 and
+#                                    reports refused folders in JSON
+#   zstd-overlay migrate DIR...      move what DIR already holds into the image
+#   zstd-overlay install             copy to /usr/local/bin and add a SessionStart hook
+#   zstd-overlay status              disk use, capacity, mounted folders
+#   zstd-overlay doctor              what is mounted, what is not, and why
+#
+# Default list: $CLAUDE_PROJECT_DIR, ~/.cache, ~/.local/share, ~/.local/bin, ~/.npm,
+# and whichever of ~/.rustup ~/.cargo ~/go ~/.m2 ~/.gradle ~/.nuget ~/.dotnet
+# ~/.bun exist.
+#
+# A VM restore drops every mount, so `install` runs `up` from a SessionStart
+# hook. A folder written to while it was not mounted is not mounted again
+# (those writes would be hidden under the image); `up` names the files and
+# leaves the folder on the normal disk until you decide.
+#
+# The image reserves its disk space up front (fallocate), leaving
+# ZSTD_OVERLAY_RESERVE_MB free outside it. A disk that fills from outside then
+# gives the writer outside a plain "No space left"; the image, whose blocks are
+# already its own, keeps working. (A sparse image would take that error itself,
+# as an I/O error, and btrfs would turn read-only.)
+#
+# Environment: ZSTD_OVERLAY_IMG (default /var/lib/zstd-overlay/disk.img),
+# ZSTD_OVERLAY_MNT (default /mnt/zstd-overlay), ZSTD_OVERLAY_RESERVE_MB (4096).
+set -euo pipefail
+shopt -s nullglob
+
+IMG=${ZSTD_OVERLAY_IMG:-/var/lib/zstd-overlay/disk.img}
+MNT=${ZSTD_OVERLAY_MNT:-/mnt/zstd-overlay}
+RESERVE=$(( ${ZSTD_OVERLAY_RESERVE_MB:-4096} * 1048576 ))
+OPTS=noatime,compress-force=zstd:3,nodiscard
+SELF=$(realpath "${BASH_SOURCE[0]}")
+LOCK=/run/zstd-overlay.lock
+REFUSED=0
+
+say() { printf 'zstd-overlay: %s\n' "$*"; }
+die() { printf 'zstd-overlay: %s\n' "$*" >&2; exit 2; }
+gib() { awk -v b="$1" 'BEGIN { printf "%.1f GiB", b / 1073741824 }'; }
+
+usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$SELF"; }
+
+key_of() { local k=${1//\//%}; printf '%s' "$k"; }
+
+# --- the image ---------------------------------------------------------------
+
+# Capacity = the image's own blocks + free disk - RESERVE, all of it allocated
+# (fallocate) so the blocks are the image's before btrfs writes to them. Grows
+# when the disk has room; shrinks when writes outside ate into the reserve.
+fit_image() {
+  local dev cur held avail target
+  dev=$(findmnt -n -o SOURCE "$MNT")
+  cur=$(df -B1 --output=size "$MNT" | tail -1 | tr -d ' ')
+  held=$(du -B1 "$IMG" | cut -f1)
+  avail=$(df -B1 --output=avail "$(dirname "$IMG")" | tail -1 | tr -d ' ')
+  target=$(( (held + avail - RESERVE) / 1048576 * 1048576 ))
+  [ "$target" -gt $(( 512 * 1048576 )) ] || target=$(( 512 * 1048576 ))
+  if [ $(( target > cur ? target - cur : cur - target )) -ge $(( 256 * 1048576 )) ]; then
+    if [ "$target" -gt "$cur" ]; then
+      fallocate -l "$target" "$IMG" || { say "warning: no room to grow the image"; return 0; }
+      losetup -c "$dev"
+      btrfs_resize "$target" || say "warning: could not grow the image to $(gib "$target")"
+    else
+      # Shrink in 256 MiB steps: one big step must move every block group above the new
+      # end at once and often fails with ENOSPC; small steps succeed (measured). Keep
+      # whatever the steps gave back.
+      local size=$cur next
+      while [ "$size" -gt "$target" ]; do
+        next=$(( size - 256 * 1048576 )); [ "$next" -ge "$target" ] || next=$target
+        btrfs_resize "$next" || { sync; sleep 2; btrfs_resize "$next"; } || break
+        size=$next
+      done
+      if [ "$size" -lt "$cur" ]; then truncate -s "$size" "$IMG"; losetup -c "$dev"; fi
+      [ "$size" -le "$target" ] || say "warning: only $(gib "$avail") free outside the image (reserve $(gib "$RESERVE")); the image gave back $(gib $(( cur - size ))) of $(gib $(( cur - target ))) ($RESIZE_ERR)"
+    fi
+  fi
+  # A fresh image (sparse) or a short fallocate leaves holes; claim them now.
+  cur=$(df -B1 --output=size "$MNT" | tail -1 | tr -d ' ')
+  [ "$(du -B1 "$IMG" | cut -f1)" -ge "$cur" ] || fallocate -l "$cur" "$IMG" \
+    || say "warning: could not reserve the image's space; writes outside could break it"
+}
+
+# BTRFS_IOC_RESIZE through perl (in every Ubuntu/Debian base); no btrfs-progs needed.
+RESIZE_ERR=""
+btrfs_resize() {
+  RESIZE_ERR=$(perl -e 'open(my $fh, "<", $ARGV[0]) or die "$ARGV[0]: $!\n";
+           ioctl($fh, 0x50009403, pack("q a4088", 0, $ARGV[1])) or die "resize: $!\n";' \
+    "$MNT" "$1" 2>&1)
+}
+
+mount_image() {
+  if mountpoint -q "$MNT"; then
+    local back; back=$(losetup -nO BACK-FILE "$(findmnt -n -o SOURCE "$MNT")" 2>/dev/null | sed 's/ *$//')
+    [ "$back" = "$(realpath -m "$IMG")" ] || die "$MNT is mounted from ${back:-something else}, not $IMG"
+    case ",$(findmnt -n -o OPTIONS "$MNT")," in *,ro,*)
+      die "the image went read-only (see dmesg). Save what you need, unmount the folders and $MNT, then run up again" ;;
+    esac
+    fit_image; return
+  fi
+  mkdir -p "$(dirname "$IMG")" "$MNT"
+  if [ ! -f "$IMG" ]; then
+    local tmp; tmp=$(mktemp -d "$(dirname "$IMG")/.new.XXXXXX")
+    sed -n '/^__ZSTD_OVERLAY_BLOB__$/,$p' "$SELF" | tail -n +2 | base64 -d | tar -xzSf - -C "$tmp"
+    mv "$tmp/disk.img" "$IMG"; rmdir "$tmp"
+  fi
+  mount -o "loop,$OPTS" "$IMG" "$MNT"
+  mkdir -p "$MNT/upper" "$MNT/work" "$MNT/stamps"
+  fit_image
+}
+
+# --- folders -----------------------------------------------------------------
+
+our_overlays() { findmnt -rn -t overlay -o TARGET,OPTIONS | awk -v u="upperdir=$MNT/upper/" 'index($2, u) { print $1 }' | sed 's/\\x20/ /g'; }
+is_mounted() { our_overlays | grep -Fxq "$1"; }
+
+# Folders that must never be covered: the system, Claude Code's own state, the image.
+guard() {
+  local dir=$1 p
+  case "$dir" in
+    /usr/local/?*) ;;
+    / | /bin | /boot | /dev | /etc | /home | /lib | /lib64 | /opt | /proc | /root | /run | /sbin | /srv \
+    | /sys | /usr | /usr/* | /var | /var/lib | /var/lib/dpkg* | /opt/claude-code*)
+      echo "a system folder"; return 1 ;;
+  esac
+  for p in "$HOME/.claude" "$MNT" "$IMG"; do
+    case "$p/" in "$dir"/*) echo "it holds $p"; return 1 ;; esac
+    [ "$p" = "$IMG" ] && continue
+    case "$dir/" in "$p"/*) echo "it is inside $p"; return 1 ;; esac
+  done
+  local o
+  while IFS= read -r o; do
+    [ -n "$o" ] && [ "$o" != "$dir" ] || continue
+    case "$dir/" in "$o"/*) echo "it is inside $o, which is already mounted"; return 1 ;; esac
+    case "$o/" in "$dir"/*) echo "it holds $o, which is already mounted"; return 1 ;; esac
+  done < <(our_overlays)
+}
+
+# Files changed in DIR (the lower layer) since its last mount. ctime, not mtime:
+# `cp -a` and `tar -p` can set mtime back, nothing sets ctime back.
+changed_since_mount() {
+  local dir=$1 stamp=$MNT/stamps/$(key_of "$1")
+  [ -f "$stamp" ] || return 0
+  find "$dir" -xdev -cnewer "$stamp" -print 2>/dev/null
+}
+
+mount_dir() { # dir [merge]
+  local dir=$1 merge=${2:-0} key why changed tmp
+  key=$(key_of "$dir")
+  is_mounted "$dir" && return 0
+  if ! why=$(guard "$dir"); then say "refused: $dir ($why)"; REFUSED=1; return 0; fi
+  mkdir -p "$dir"
+  changed=$(changed_since_mount "$dir")
+  if [ -n "$changed" ] && [ "$merge" != 1 ]; then
+    say "NOT MOUNTED: $dir changed while it was not mounted; mounting would hide these:"
+    printf '%s\n' "$changed" | head -20 | sed 's/^/    /'
+    [ "$(printf '%s\n' "$changed" | wc -l)" -le 20 ] || say "    ... and $(( $(printf '%s\n' "$changed" | wc -l) - 20 )) more"
+    say "  it stays on the normal disk. Keep those changes: zstd-overlay up --merge $dir"
+    REFUSED=1; return 0
+  fi
+  if [ -n "$changed" ]; then   # --merge: set the changed files aside, mount, put them back on top
+    tmp=$(mktemp -d "$MNT/merge.XXXXXX")
+    find "$dir" -xdev -cnewer "$MNT/stamps/$key" ! -type d -printf '%P\0' \
+      | tar -C "$dir" --null -T - -cf - | tar -C "$tmp" -xpf -
+  fi
+  mkdir -p "$MNT/upper/$key" "$MNT/work/$key"
+  mount -t overlay overlay -o "lowerdir=$dir,upperdir=$MNT/upper/$key,workdir=$MNT/work/$key" "$dir"
+  if [ -n "${tmp:-}" ]; then cp -a "$tmp/." "$dir/"; rm -rf "$tmp"; say "merged $(printf '%s\n' "$changed" | wc -l) changed paths into $dir"; fi
+  touch "$MNT/stamps/$key"
+  say "compressed: $dir"
+  stale_processes "$dir"
+}
+
+# A process that was already inside DIR keeps the old folder as its working
+# directory: what it writes by relative path goes there, under the mount.
+# Claude Code itself is not one of them: it resolves its working directory by
+# path for every command, so commands it starts after the mount see the image
+# (checked in a session on 2026-11-02).
+stale_processes() {
+  local dir=$1 lowerdev pid cwd names=()
+  lowerdev=$(stat -c %d "$(dirname "$dir")")
+  for pid in /proc/[0-9]*; do
+    grep -qa zstd-overlay "$pid/cmdline" 2>/dev/null && continue
+    case "$(readlink "$pid/exe" 2>/dev/null)" in */claude) continue ;; esac
+    cwd=$(readlink "$pid/cwd" 2>/dev/null) || continue
+    case "$cwd/" in "$dir"/*) ;; *) continue ;; esac
+    [ "$(stat -L -c %d "$pid/cwd" 2>/dev/null)" = "$lowerdev" ] || continue
+    names+=("${pid#/proc/}:$(tr '\0' ' ' < "$pid/cmdline" | cut -c1-40 | sed 's/ *$//')")
+  done
+  [ ${#names[@]} -eq 0 ] && return 0
+  say "  note: ${#names[@]} process(es) started earlier still work in the old $dir; what they write by"
+  say "  relative path goes under the mount. Restart them if they write there: $(printf '%s, ' "${names[@]:0:4}" | sed 's/, $//')$([ ${#names[@]} -le 4 ] || echo ", ...")"
+}
+
+default_dirs() {
+  [ -n "${CLAUDE_PROJECT_DIR:-}" ] && printf '%s\n' "$CLAUDE_PROJECT_DIR"
+  printf '%s\n' "$HOME/.cache" "$HOME/.local/share" "$HOME/.local/bin" "$HOME/.npm"
+  local d
+  for d in .rustup .cargo go .m2 .gradle .nuget .dotnet .bun; do
+    [ -d "$HOME/$d" ] && printf '%s\n' "$HOME/$d"
+  done
+  return 0
+}
+
+RESOLVED=()
+resolve_dirs() { # sets RESOLVED to absolute paths, refusing a folder listed inside another
+  local d all=() o nested
+  RESOLVED=()
+  for d in "$@"; do [ -n "$d" ] && all+=("$(realpath -m "$d")"); done
+  for d in "${all[@]}"; do
+    nested=""
+    for o in "${all[@]}"; do
+      if [ "$o" != "$d" ]; then case "$d/" in "$o"/*) nested=$o ;; esac; fi
+    done
+    if [ -n "$nested" ]; then say "refused: $d (it is inside $nested, also listed)"; REFUSED=1; else RESOLVED+=("$d"); fi
+  done
+}
+
+# --- commands ----------------------------------------------------------------
+
+cmd_up() {
+  local merge=0 d dirs
+  if [ "${1:-}" = --merge ]; then merge=1; shift; [ $# -gt 0 ] || die "--merge needs the folders to merge"; fi
+  mount_image
+  if [ $# -eq 0 ]; then mapfile -t dirs < <(default_dirs); else dirs=("$@"); fi
+  resolve_dirs "${dirs[@]}"
+  for d in "${RESOLVED[@]}"; do mount_dir "$d" "$merge"; done
+}
+
+tree_sig() { # entry count and total file bytes of a tree
+  printf '%s:%s' "$(find "$1" | wc -l)" "$(find "$1" -type f -printf '%s\n' | awk '{ s += $1 } END { print s + 0 }')"
+}
+
+cmd_migrate() {
+  [ $# -gt 0 ] || die "migrate needs folders"
+  mount_image
+  local d key new before after
+  resolve_dirs "$@"
+  for d in "${RESOLVED[@]}"; do
+    if [ "$d" = "${CLAUDE_PROJECT_DIR:-}" ] || git -C "$d" rev-parse --show-toplevel 2>/dev/null | grep -Fxq "$d"; then
+      say "refused: $d is a repository; repositories are mounted, never migrated"; REFUSED=1; continue
+    fi
+    if is_mounted "$d"; then say "skipped: $d is mounted already; migrate runs before the first mount of a session"; continue; fi
+    [ -d "$d" ] || { say "skipped: $d does not exist"; continue; }
+    mount_dir "$d"
+    is_mounted "$d" || continue
+    key=$(key_of "$d"); new=$MNT/upper/$key.migrating
+    rm -rf "$new"; mkdir -p "$new"
+    # Copy the merged view: it already hides what was deleted and shows the newest version.
+    cp -a --reflink=auto "$d/." "$new/"
+    before=$(tree_sig "$d"); after=$(tree_sig "$new")
+    if [ "$before" != "$after" ]; then
+      rm -rf "$new"; say "migrate aborted: the copy of $d has $after (entries:bytes), expected $before; nothing changed"; REFUSED=1; continue
+    fi
+    umount "$d"
+    mv "$d" "$d.zstd-overlay-old"
+    mkdir "$d"; chmod --reference="$d.zstd-overlay-old" "$d"; chown --reference="$d.zstd-overlay-old" "$d"
+    rm -rf "$MNT/upper/$key" "$MNT/work/$key"; mv "$new" "$MNT/upper/$key"
+    rm -f "$MNT/stamps/$key"
+    mount_dir "$d"
+    if is_mounted "$d" && [ "$(tree_sig "$d")" = "$before" ]; then
+      rm -rf "$d.zstd-overlay-old"
+      say "migrated: $d ($(gib "${before#*:}") now in the image)"
+    else
+      say "migrate check failed: $d.zstd-overlay-old kept; nothing deleted"; REFUSED=1
+    fi
+  done
+}
+
+cmd_install() {
+  local settings=$HOME/.claude/settings.json hook tmp
+  [ "$SELF" = /usr/local/bin/zstd-overlay ] || install -m 755 "$SELF" /usr/local/bin/zstd-overlay
+  hook='{"matcher":"startup|resume","hooks":[{"type":"command","command":"/usr/local/bin/zstd-overlay up --hook","timeout":600}]}'
+  mkdir -p "$HOME/.claude"; [ -s "$settings" ] || echo '{}' > "$settings"
+  tmp=$(mktemp "$settings.XXXXXX")
+  # Replace any earlier zstd-overlay hook rather than adding a second one.
+  if command -v jq >/dev/null; then
+    jq --argjson h "$hook" '
+      .hooks.SessionStart = ((.hooks.SessionStart // [])
+        | map(select(any(.hooks[]?; (.command // "") | startswith("/usr/local/bin/zstd-overlay ")) | not)) + [$h])' \
+      "$settings" > "$tmp" || { rm -f "$tmp"; die "$settings is not valid JSON; left unchanged"; }
+  elif command -v python3 >/dev/null; then
+    python3 -I - "$settings" "$hook" > "$tmp" <<'PY' || { rm -f "$tmp"; die "$settings is not valid JSON; left unchanged"; }
+import json, sys
+s = json.load(open(sys.argv[1])); h = json.loads(sys.argv[2])
+ss = s.setdefault("hooks", {}).setdefault("SessionStart", [])
+ours = lambda e: any((x.get("command") or "").startswith("/usr/local/bin/zstd-overlay ") for x in e.get("hooks", []))
+ss[:] = [e for e in ss if not ours(e)]
+ss.append(h); json.dump(s, sys.stdout, indent=2); print()
+PY
+  else
+    rm -f "$tmp"; die "need jq or python3 to edit $settings; add this SessionStart hook by hand: $hook"
+  fi
+  mv "$tmp" "$settings"
+  say "installed /usr/local/bin/zstd-overlay and a SessionStart hook in $settings"
+  say "the image is created at the first session start, not now"
+}
+
+cmd_status() {
+  mountpoint -q "$MNT" || { say "image not mounted (run: zstd-overlay up)"; return 0; }
+  local held stored cap avail
+  held=$(du -B1 "$IMG" | cut -f1)
+  stored=$(du -s --apparent-size -B1 "$MNT/upper" | cut -f1)
+  cap=$(df -B1 --output=size "$MNT" | tail -1 | tr -d ' ')
+  avail=$(df -B1 --output=avail "$(dirname "$IMG")" | tail -1 | tr -d ' ')
+  say "stored $(gib "$stored"); image capacity $(gib "$cap") (reserved on disk: $(gib "$held")); free outside the image $(gib "$avail")"
+  our_overlays | sed 's/^/  /'
+}
+
+cmd_doctor() {
+  cmd_status
+  local d changed
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    if is_mounted "$d"; then echo "  ok        $d"; continue; fi
+    if ! guard "$d" >/dev/null; then echo "  refused   $d ($(guard "$d"))"; continue; fi
+    if mountpoint -q "$MNT"; then changed=$(changed_since_mount "$d" | wc -l); else changed=0; fi
+    if [ "$changed" -gt 0 ]; then echo "  CHANGED   $d ($changed paths changed while unmounted; see: zstd-overlay up $d)"
+    else echo "  unmounted $d"; fi
+  done < <(default_dirs)
+}
+
+json_str() { local s=$1; s=${s//\\/\\\\}; s=${s//\"/\\\"}; s=${s//$'\t'/\\t}; s=${s//$'\r'/}; s=${s//$'\n'/\\n}; printf '"%s"' "$s"; }
+
+# `up --hook`, the SessionStart hook: Claude Code reads a hook's stdout only when
+# it exits 0, so this always exits 0 and, when a folder was refused, answers in
+# JSON: a warning the user sees (systemMessage) and the details for Claude
+# (additionalContext). A hard failure still exits 2 with its message on stderr,
+# which Claude Code shows the user.
+hook_up() {
+  local out; out=$(mktemp)
+  cmd_up "$@" > "$out"
+  if [ "$REFUSED" = 0 ]; then cat "$out"; rm -f "$out"; return 0; fi
+  local ctx; ctx="$(cat "$out")
+Some folders were left on the normal disk, uncompressed, so that nothing is hidden. Tell the user which ones and why. Run \`zstd-overlay up --merge DIR\` only after the user has looked at the listed files and agreed."
+  printf '{"systemMessage": %s, "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": %s}}\n' \
+    "$(json_str "zstd-overlay: $(grep -c 'NOT MOUNTED\|refused:' "$out") folder(s) not compressed this session; details: zstd-overlay doctor")" \
+    "$(json_str "$ctx")"
+  rm -f "$out"
+}
+
+[ "$(id -u)" = 0 ] || case "${1:-}" in "" | -h | --help | help) ;; *) die "needs root (it mounts)";; esac
+
+case "${1:-}" in
+  "" | -h | --help | help) usage ;;
+  up | migrate | status | doctor | install)
+    cmd=$1; shift
+    exec 9> "$LOCK"; flock -w 120 9 || die "another zstd-overlay is running"
+    if [ "$cmd" = up ] && [ "${1:-}" = --hook ]; then shift; hook_up "$@"; exit 0; fi
+    "cmd_$cmd" "$@"
+    [ "$REFUSED" = 0 ] || exit 3 ;;
+  *) die "unknown command: $1 (see --help)" ;;
+esac
+exit 0
+
+# An empty btrfs filesystem (100 GiB sparse, 4 MiB on disk; `up` resizes it to
+# fit the real disk). Made with btrfs-progs 6.6.3:
+#   truncate -s 100G disk.img && mkfs.btrfs -m single -L zstd-overlay disk.img
+#   tar -Sczf - disk.img | base64 -w 76
+# The kernel mounts btrfs but cannot create one, and mkfs.btrfs is not in the
+# base image, so the empty filesystem ships here.
+__ZSTD_OVERLAY_BLOB__
+H4sIAAAAAAAAA+3dfYhdZX4H8OfOSyZvLRMprYEtKOsuuJIhCTHqrpk5EW3NliyTyW4LUhLiJlnf
+1oAmorJsL9UKJbj9I1oqZbdpQbe2Ilnzh+v+oReLky2Im+6iLMiyLQbUP8QVLcFKm86cc54z52Xu
+vZO31Uk+nzD3vHyf5znPOffM5P7zO3f37ffeOXb7t78VzqO1MzZu2JAuZ5SX69duvDpdX3f1+mvW
+r9u4buPGa8La9evXrbsmXLb9fE4qOnDv/l33XHZZuGffvv292vXLz9jaObPr68pXZ0P5im3ckK9v
+KLePXUI7G+7SU/8ZKuO08mD1vEcvh+WZAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABePP/uHJ/6tVz619/DjG666cd+Ty3e0Pr5t
+2bshtNL9rTzfecPNU3u379y6pOgxmS2S0a5jrk7zgXQ99ovjhdluSf4zs75rZjFc6z+YLzcPlna2
+Suursxm0igHjT0/PbXnk2hNbbxo7ev/oi5veWHNF/dQfvHf/7jX77ttzz127Hug3Fheg/BY7MXcv
+JenrQK1FsV269VqhfItm/es33PmaNwBw5jrZR9vi42j+EXfu4+lUdbtdax+21frX2ofqR+PyJ9rT
+kx23+Ehen2dSyz+1eWbHmfsUP1rdzudVbCe19kk9X9WYTzrPTqux//RkxxnqOs9t1fxTmycAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAZ8jVfzj6T73yqb2HH99w1Y37nly+o/Xx
+bcveDWE03d/K4tb3f3H4B1/7dXLgmft27jx68PM3D+b94nKo1Dj8Mq5cNxHCraXkRBz23fEQJqtB
+uhmeaAbH05UtMQAAAAAAAAAAAAAAAAAAAOC3qZ2+DhTbrdJrXGul1eSt9F+UFYs/t+WRa09svWns
+6P2jL256Y80V3cYb6jveZJfxknnHK7ZH535alXmPzjveXB7C6vQ1adXH6a0+Yr2e/8juH93Wq3+j
+/j/pXf8/nPdT/w8AAAAAAAAAAAAAAAAAAHBha6ev6v/DOar//92//8ZPevVv1P+3K4ds1P/HGcf6
+/4G5i3Ba9f8AAAAAAAAAAAAAAAAAAABwNpL09TzW/zfG6a1f/f/Na/7rZK/+jfr/zsLq/+MTFFpz
+FyGEV+OE75wIYW2/qQMAAAAAAAAAAAAAAAAAAMCiNRhXikcHxHr9JH2t1+v//l+/eqDXeI36/7Cq
+HHet/x8+FycDAAAAAAAAAAAAAAAAAAAAF4nO/7x/V6+8Uf+fLKz+f+S8zRgAAAAAAAAAAAAAAAAA
+AAAuPGu/t+S/e+WN+v/2wur/l+fLgWwxmr5Oh5CkK4cmQlg6u9LJRjsWkvEiAAAAAAAAAAAAAAAA
+AAAAgItGrNP/5yumBnu1a9T/5xX7ef9G/X9e7x+G8uVA+WCvxgcB3DkRwtpqMJmufCUPAAAAAAAA
+AAAAAAAAAAAA4DOlKM6PpfJ5oXwI7fS1Xn/fbD+aL5N52//kk0O/1+v4jfr/cEl5+K71/4PlZZzL
+L+PKdRMh3FpKTsRpvjuen+BckJ3vE+NzZw4AAAAAAAAAAAAAAAAAAMCFp52+DhTbWd35UGW7lVan
+t9J/UVaL/tyWR649sfWmsaP3j7646Y01V8Qq+/p4xfbo3E8rlIr08/L3+nhzeQir09dOY5ze6iPW
+6/n/8U9/+t1e/Rv1/8nC6v/jckX59Drx+jw0EcKl6dqq9PXpeLg7a8GR4VKQSmo9tsceeXBkpBRk
+R631WD8TXJ6uXVINVsUgqQW/Gc+Ddi34WQzy+6EInq0FnXin/e14PMFa8HwM2vl5LM+HWhHPo97j
+w249ZoN5e7xZHBwAAAAAAAAAAAAAAAAAAOAzJcmXeS37UHUz1EvZj7T6NVjer8FAvwaD/RrUJ1lv
+2G1/aLcqQdz/7c0vvRx6aNT/txdW/x8vxZJskdX/T8drfmgihKWl4Fgc8FAsds9r2o/FN6kIOpfE
+YFM1yIvdp2Ox+8F4jGQy79H5iyIAAAAAAAAAAAAAAAAAAACAT1V8LsBgz1YAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAfNbt/Nb9B3rlU3sPP77hqhv3Pbl8R+vj25a9
+G8Jkur+Vxa3v/+LwD7726+TAM/ft3Hn04OdvXpL3y/OwYvZlIN94OI56YlMIz880GaoHa67PguF8
+e2Uc73MzwaowFxQ99nw561E/cHjluhAOh7mgGOqFmWBlKfj6z19+6dHZlcdmgi/MLEfqx/jVNdkx
+ltWDL27MguX1YN+GLDh5KlMEP16fBQAAAAAAAAAAAAAAAFwEYjFMUfTSmao2SObv16X+ZHj+3YtO
+/fQG40rSvd17m8/bdBqW1Hck22rb8/fr8rY1huO8aP56bK9uJvP389vWaPfb/G1rXOfEH8lQKqTM
+KxRPzUUjYWD3nr27Dty1P+4ZCGNjg6GLpLp5rt7n5996547TWV8092GcQHuy2iCZv1+/+/C1j0Ze
+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
+eWbHGeo6z23V/FObJwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAALBL/D14G
+pEYAWEMA

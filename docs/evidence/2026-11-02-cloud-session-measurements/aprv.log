@@ -1,0 +1,40 @@
+ext4 used before: 10849 MiB
+compressed: /home/user/apple-purchase-receipt-verifier
+compressed: /root/.cache
+compressed: /root/.rustup
+compressed: /root/.cargo
+compressed: /root/go
+compressed: /root/.m2
+compressed: /root/.npm
+compressed: /root/.nuget
+compressed: /usr/lib/dotnet
+compressed: /opt/swift
+apt-dotnet-musl        ok           22s  real    258 MiB  stored    601 MiB  ext4-used  11117 MiB
+swift-6.3              ok           76s  real   2390 MiB  stored   3966 MiB  ext4-used  13248 MiB
+rust-toolchain         ok           29s  real   2638 MiB  stored   4687 MiB  ext4-used  13497 MiB
+wasm-module            ok          108s  real   1998 MiB  stored   5672 MiB  ext4-used  12857 MiB
+place-module           ok            0s  real   1999 MiB  stored   5677 MiB  ext4-used  12857 MiB
+rust-test              FAIL(101)   144s  real   3011 MiB  stored   8773 MiB  ext4-used  13870 MiB
+aprv-server            FAIL(101)   320s  real   3302 MiB  stored   9706 MiB  ext4-used  14161 MiB
+java                   ok          119s  real   3336 MiB  stored   9744 MiB  ext4-used  14195 MiB
+java-wasm              FAIL(1)      10s  real   3346 MiB  stored   9769 MiB  ext4-used  14205 MiB
+node                   ok           20s  real   3623 MiB  stored  10341 MiB  ext4-used  14482 MiB
+go                     ok           38s  real   3816 MiB  stored  10826 MiB  ext4-used  14675 MiB
+python                 FAIL(1)      22s  real   3865 MiB  stored  11060 MiB  ext4-used  14724 MiB
+ruby                   FAIL(1)      42s  real   3926 MiB  stored  11175 MiB  ext4-used  14808 MiB
+swift-test             ok          349s  real   4244 MiB  stored  11645 MiB  ext4-used  15126 MiB
+dotnet                 FAIL(1)      21s  real   4470 MiB  stored  12580 MiB  ext4-used  15457 MiB
+php                    FAIL(100)   377s  real   9967 MiB  stored  18054 MiB  ext4-used  20954 MiB
+tools-lint             ok            1s  real   9970 MiB  stored  18057 MiB  ext4-used  20956 MiB
+per-dir stored (uncompressed MiB):
+41	/mnt/cloud-disk/upper/%root%.m2
+126	/mnt/cloud-disk/upper/%root%.npm
+213	/mnt/cloud-disk/upper/%root%.cargo
+370	/mnt/cloud-disk/upper/%root%go
+465	/mnt/cloud-disk/upper/%root%.nuget
+602	/mnt/cloud-disk/upper/%usr%lib%dotnet
+721	/mnt/cloud-disk/upper/%root%.rustup
+3366	/mnt/cloud-disk/upper/%opt%swift
+5640	/mnt/cloud-disk/upper/%home%user%apple-purchase-receipt-verifier
+6519	/mnt/cloud-disk/upper/%root%.cache
+DONE

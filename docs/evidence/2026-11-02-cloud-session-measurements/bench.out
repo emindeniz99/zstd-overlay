@@ -1,0 +1,42 @@
+node_modules      ext4      (baseline)         756      0.0      5.0
+node_modules      btrfs     none               633      8.7      3.4
+node_modules      btrfs     lzo                368     12.6      3.4
+node_modules      btrfs     zlib:1             274     14.2      5.4
+node_modules      btrfs     zlib:3             265     15.2      5.4
+node_modules      btrfs     zlib:9             250     30.1      5.2
+node_modules      btrfs     zstd:-5            337     13.2      4.3
+node_modules      btrfs     zstd:1             265     13.4      5.1
+node_modules      btrfs     zstd:3             257     15.1      4.7
+node_modules      btrfs     zstd:9             245     16.9      5.1
+node_modules      btrfs     zstd:15            238     52.5      4.9
+node_modules      erofs     lz4(nomount)                0.0      0.0
+node_modules      erofs     lz4hc,12(nomount)              0.0      0.0
+node_modules      erofs     deflate,9(nomount)              0.0      0.0
+node_modules      erofs     libdeflate,12(nomount)              0.0      0.0
+node_modules      erofs     lzma,6(nomount)              0.0      0.0
+node_modules      squashfs  gzip               165     14.9     11.8
+node_modules      squashfs  lzo                183     22.4      7.7
+node_modules      squashfs  lz4                239      5.4      8.6
+node_modules      squashfs  zstd               152     23.9      7.9
+node_modules      squashfs  xz                 146     38.0     20.2
+toolchain_rustup  ext4      (baseline)         623      0.0      6.1
+toolchain_rustup  btrfs     none               625      7.1      0.8
+toolchain_rustup  btrfs     lzo                358      2.3      0.9
+toolchain_rustup  btrfs     zlib:1             247      4.7      1.5
+toolchain_rustup  btrfs     zlib:3             238      6.6      1.7
+toolchain_rustup  btrfs     zlib:9             225     25.4      1.6
+toolchain_rustup  btrfs     zstd:-5            327      3.6      0.8
+toolchain_rustup  btrfs     zstd:1             236      2.1      0.9
+toolchain_rustup  btrfs     zstd:3             224      2.0      1.0
+toolchain_rustup  btrfs     zstd:9             210      5.8      0.9
+toolchain_rustup  btrfs     zstd:15            198     23.2      1.0
+toolchain_rustup  erofs     lz4(nomount)                0.0      0.0
+toolchain_rustup  erofs     lz4hc,12(nomount)              0.0      0.0
+toolchain_rustup  erofs     deflate,9(nomount)              0.0      0.0
+toolchain_rustup  erofs     libdeflate,12(nomount)              0.0      0.0
+toolchain_rustup  erofs     lzma,6(nomount)              0.0      0.0
+toolchain_rustup  squashfs  gzip               206     19.6      4.3
+toolchain_rustup  squashfs  lzo                227     26.1      1.7
+toolchain_rustup  squashfs  lz4                296      0.7      1.5
+toolchain_rustup  squashfs  zstd               184     21.9      2.0
+toolchain_rustup  squashfs  xz                 167     38.9     15.6
