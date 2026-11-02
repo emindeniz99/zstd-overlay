@@ -82,3 +82,5 @@ Nothing but Nix builds a btrfs loop volume with `compress=zstd:1` for `/nix` on 
 - Not done in Docker: the verifier end to end with the final script (measured with the prototype, above) and the real cloud environment's setup script and snapshot.
 
 The full run of the version in commit `0253ed0` (bash): 13 of 13 scenarios, 78 of 78 checks passed.
+
+The Python rewrite (`2335422`): the full run passed 76 of 77 checks. The one failure was the test: on the image without python3, "nothing was mounted" counted the container's own overlay root. With the check counting only zstd-overlay's mounts and btrfs, scenario 10 passed 7 of 7. The unit tests (44) pass on Python 3.11 to 3.15.

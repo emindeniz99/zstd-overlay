@@ -298,7 +298,8 @@ s10() {
   start s10b "$BARE"
   out=$(x "$ZO up 2>&1; echo exit=\$?")
   check "bare image without python3: stops at once and names python3" has "$out" "python3"
-  check "bare image: nothing was mounted" eq "$(x 'findmnt -rn -t overlay,btrfs | wc -l')" 0
+  # (the container's own root is an overlay too; count only ours and btrfs)
+  check "bare image: nothing was mounted" eq "$(mounts):$(x 'findmnt -rn -t btrfs | wc -l')" "0:0"
   done_scenario
 }
 
