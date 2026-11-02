@@ -81,4 +81,4 @@ Nothing but Nix builds a btrfs loop volume with `compress=zstd:1` for `/nix` on 
 - Scenario 12: a `docker commit` after `install` added nothing measurable; one with a 1,023 MiB reserved image added 1,026 MiB.
 - Not done in Docker: the verifier end to end with the final script (measured with the prototype, above) and the real cloud environment's setup script and snapshot.
 
-The full run of the committed version was still going when this was committed; its result follows in the next commit.
+The full run of the version in commit `0253ed0` (bash): 13 of 13 scenarios, 78 of 78 checks passed.
