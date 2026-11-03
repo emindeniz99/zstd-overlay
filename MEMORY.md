@@ -9,6 +9,7 @@
 
 ## Decisions
 
+- 2026-11-03: re-asked whether the repository's source should leave the image, with only build and dependency folders mounted into it. Kept as is (owner): each build folder would be a mount point, and a mount point cannot be removed. Measured: `rm -rf node_modules` exits 1 (contents gone, folder stays, so `rm -rf node_modules && pnpm install` stops), `cargo clean` exits 101; `npm ci` and `uv venv --clear` work. The current design has no mount point inside a repository.
 - 2026-11-03: `~/.local/bin` and the toolchain folders stay in the default list although they are empty until the hook mounts (owner chose compression; nothing in the owner's repositories runs uv, mise or cargo before the hook). Revisit trigger: a `uvx` MCP server or a SessionStart hook that calls those tools.
 - 2026-11-03: the repository stays in the image (writes compressed as they happen; a 5.3 GB build would not fit the 4 GB outside), but its startup files (CLAUDE.md, CLAUDE.local.md, AGENTS.md, .claude/, .mcp.json) are moved back to the normal disk at each mount, with a note telling Claude to re-read CLAUDE.md (owner chose the narrow fix over keeping the repository out of the image).
 
