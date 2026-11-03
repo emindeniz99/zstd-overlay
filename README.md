@@ -45,7 +45,9 @@ A VM restore keeps files but drops every mount, so the folders must be mounted a
 { "matcher": "startup|resume", "hooks": [{ "type": "command", "command": "/usr/local/bin/zstd-overlay up --hook", "timeout": 600 }] }
 ```
 
-`--hook` matters: Claude Code reads a hook's output only when it exits 0. So in that mode `up` always exits 0, and when it leaves a folder unmounted it answers in JSON: a warning you see, and the list of files plus the rule "merge only after the user agreed" for Claude.
+`--hook` matters: Claude Code reads a hook's output only when it exits 0. So in that mode `up` always exits 0, and when it leaves a folder unmounted it answers in JSON: a warning you see, and the list of files plus the rule "merge only after the user agreed" for Claude. It also does nothing unless `CLAUDE_CODE_REMOTE` is `true`, which only a cloud session sets, so a settings file that reaches a laptop does not try to mount there. The hook runs in the foreground on purpose: an `async` hook would let the session write into the folders before they are mounted, the very conflict the safety rule exists for.
+
+To change the reserve or the image's place, set `ZSTD_OVERLAY_RESERVE_MB` (and the others under Environment in `--help`) in the environment's variables; a session reads them again at every restore. Not tested: a cloud thread in a Claude project, where repository hooks do not run; whether it runs a user-level hook is unknown.
 
 Run `install` from the environment's setup script. This repository is private, so the setup script cannot download the file; paste it in:
 

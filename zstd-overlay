@@ -491,11 +491,14 @@ class Session:
                     self.say(f"warning: could not grow the image to {gib(target)} ({err})")
             else:
                 size, err = cur, None
+                # btrfs removes block groups emptied by deletes only after a commit, in the
+                # background: the first step was refused (ENOSPC) for 22 s in one measurement.
+                deadline = time.monotonic() + 45
                 for step in shrink_steps(cur, target):
                     err = btrfs_resize(cfg.mnt, step)
-                    if err:  # btrfs frees a deleted file's blocks only after a commit
+                    while err and time.monotonic() < deadline:
                         os.sync()
-                        time.sleep(2)
+                        time.sleep(3)
                         err = btrfs_resize(cfg.mnt, step)
                     if err:
                         break
@@ -926,6 +929,10 @@ def main(argv: list[str] | None = None) -> int:
     if cmd not in ("up", "migrate", "install", "status", "doctor"):
         print(f"zstd-overlay: unknown command: {cmd} (see --help)", file=sys.stderr)
         return 2
+    # The hook is for cloud sessions, where CLAUDE_CODE_REMOTE is "true". A settings file that
+    # reaches a laptop must not try to mount there at every session start.
+    if cmd == "up" and "--hook" in args and os.environ.get("CLAUDE_CODE_REMOTE") != "true":
+        return 0
     if os.geteuid() != 0:
         print("zstd-overlay: needs root (it mounts)", file=sys.stderr)
         return 2

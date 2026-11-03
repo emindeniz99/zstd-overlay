@@ -55,7 +55,7 @@ start() { # name [image]
   local extra=""
   [ -n "$CLAUDE_BIN" ] && extra="-v $CLAUDE_BIN:/usr/local/bin/claude:ro"
   # shellcheck disable=SC2046,SC2086
-  docker run -d --privileged --name "$CT" -e HOME=/root -e CLAUDE_PROJECT_DIR=/work/repo \
+  docker run -d --privileged --name "$CT" -e HOME=/root -e CLAUDE_PROJECT_DIR=/work/repo -e CLAUDE_CODE_REMOTE=true \
     -v "$PROJ:/src:ro" $extra $(proxy_env) $(ca_mount) "${2:-$CLOUD}" sleep infinity >/dev/null
   x 'mkdir -p /work/repo && cd /work/repo && git init -q 2>/dev/null; printf "hello\n" > README; printf "only in the clone\n" > LOWERONLY; true'
 }

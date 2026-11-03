@@ -425,3 +425,12 @@ def test_git_config_below_the_folder_keeps_both_sides(tmp_path):
     text = (lower / ".git" / "config").read_text()
     assert "sshCommand = platform" in text
     assert "remote = origin" in text
+
+
+def test_the_hook_does_nothing_outside_a_cloud_session(monkeypatch, capsys):
+    # CLAUDE_CODE_REMOTE is "true" only in cloud sessions; on a laptop the hook must not mount or
+    # fail at every session start, even run without root.
+    monkeypatch.delenv("CLAUDE_CODE_REMOTE", raising=False)
+    monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    assert zo.main(["up", "--hook"]) == 0
+    assert capsys.readouterr().out == ""
