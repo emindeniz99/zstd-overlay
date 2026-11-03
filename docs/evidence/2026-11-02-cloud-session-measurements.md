@@ -156,3 +156,7 @@ The run of these changes: 21 of 21 scenarios, 85 unit tests on Python 3.11 to 3.
 - `9e828fbb7f4d` (the tool of `fff3d52`, taken with `git show`) installed by hand at 16:08 and ran the 16:52 resume: exit 0, `doctor` 9 of 9 ok, nothing refused, `git fsck` clean, `loop0` with direct I/O on. Its `version` says `working copy`, as a `git show` copy must; the README now says so.
 - Not exercised: the mount retry from a backup root (`517c434`); the image has never failed to mount.
 - Unchanged by design: an MCP server started before the mount (xcodebuildmcp) triggers the "started earlier" note on every resume.
+
+## 2026-11-03, what the hook tells Claude (branch `claude/zstd-overlay-hook-context`)
+
+Requested by the second session's field report: a fresh session learned the tool from its source, and an edited `.claude/rules/` file was written back without a note to read it. The header and the split note: 91 unit tests on Python 3.11 to 3.15; 20 of 21 scenarios on the first run, the failure being scenario 20's own check, which counted the host's `/src` overlay as a home folder (the harness excludes `/src` elsewhere for the same reason); with the count left out, scenario 20 passed. The header, run here: four lines, "0.9 GiB used on disk, 25.0 GiB free inside it", "Outside the image only 4.0 GiB is free". The setup script is now 62,743 bytes of the field's 65,536.
