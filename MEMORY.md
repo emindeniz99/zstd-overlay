@@ -2,6 +2,7 @@
 
 ## Now
 
+- 2026-11-03: 94085a131cbe runs in both sessions of the environment: the old one was fixed by hand (layer folded, 12,769 npm files merged, nothing refused), this one resumed at 06:37 with nothing refused or moved again. Open: the old session's next resume; the final setup script pasted into both environments; the PR.
 - 2026-11-02: Python version: `zstd-overlay` (up, migrate, install, status, doctor), 44 unit tests (`mise run check`, `mise run matrix`) and `tests/run.sh` (13 Docker scenarios). 2026-11-03: works through a real environment's setup script (hook ran at start; 200 MB of text cost 7 MB). Hook on `resume` observed working (9fdf465928aa, this session, 05:45).
 - Next: graduate to a public repo so setup scripts can `curl` it (this repo is private).
 

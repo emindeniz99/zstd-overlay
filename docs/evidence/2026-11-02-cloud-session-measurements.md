@@ -119,3 +119,8 @@ This session, with `9fdf465928aa` installed, resumed (boot 05:45:32). The Sessio
 The environment's other session was still on `dd94e60`: a running session never gets a changed setup script. That version had mounted the repository on its own, so the new default (`/home/user`) would leave its earlier layer unseen; `up` now folds such layers into the normal disk first (scenario 17).
 
 The full run of `9eb3465` (scenarios 1 to 18): 18 of 18 scenarios, 128 of 128 checks passed; 59 unit tests on Python 3.11 to 3.15.
+
+## Both sessions on 94085a131cbe, 2026-11-03
+
+- **The old session** (still on `dd94e60`, refusing the repository and `~/.npm` on every resume, with about 200 and 15,000 files listed) installed `94085a131cbe` by hand. `up` exited 0 with nothing refused: it folded the earlier layer of `/home/user/playground`, mounted `/home/user`, merged 12,769 changed files into `~/.npm` and migrated it (0.2 GiB). The tree stayed clean at its HEAD, `git fsck` passed, `.git` became a bind mount from the normal disk, `~/.npm` held 13,385 files before and after, and a 200 MB test file grew the image by about 108 MB. Its `up` named a `tail -40` from the agent's own pipe as a process started earlier: a sibling in the same pipeline, cosmetic.
+- **This session** resumed at 06:37 with `94085a131cbe` installed. The hook mounted all 13 folders, refused nothing and migrated nothing again; the repository was clean at `1467765` and `git fsck` passed.
