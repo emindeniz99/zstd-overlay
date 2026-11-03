@@ -559,11 +559,37 @@ s20() {
   done_scenario
 }
 
+s21() {
+  scenario 21 "the built setup script: installs from the paste, names the commit, refuses a truncated paste"
+  local built="$HERE/.setup-script.sh"
+  if ! "$PROJ/build-setup-script.sh" HEAD > "$built" 2>>"$LOG"; then echo "    SKIP  build-setup-script.sh failed (see log)"; SCN_SKIP=1; CT=""; done_scenario; return; fi
+  start s21
+  check "the built script is under 32 KB (the paste field's limit is about 64 KB)" lt "$(wc -c < "$built")" 32768
+  docker cp "$built" "$CT:/setup-script.sh" 2>>"$LOG"
+  local out; out=$(x 'bash /setup-script.sh; echo exit=$?')
+  check "the setup script runs install" has "$out" "installed /usr/local/bin/zstd-overlay"
+  check "and exits 0" has "$out" "exit=0"
+  out=$(x '/usr/local/bin/zstd-overlay version')
+  check "version names the commit and its date" has "$out" "(commit $(git -C "$PROJ" rev-parse --short HEAD), 20"
+  check "and the hash the script's header names" has "$out" "$(sed -n 's/.*zstd-overlay version prints \([0-9a-f]*\)).*/\1/p' "$built")"
+  xs "$ZO up"
+  check "the installed copy works: the default folders mount" eq "$(mounts)" 5
+  stop
+  start s21b
+  head -c -3000 "$built" > "$HERE/.setup-script-cut.sh"
+  docker cp "$HERE/.setup-script-cut.sh" "$CT:/setup-script.sh" 2>>"$LOG"
+  out=$(x 'bash /setup-script.sh 2>&1; echo exit=$?')
+  check "a truncated paste exits non-zero" eq "$(printf '%s\n' "$out" | grep -c 'exit=0')" 0
+  check "and installs nothing" eq "$(x 'ls /usr/local/bin/zstd-overlay /root/.claude/settings.json 2>/dev/null | wc -l')" 0
+  rm -f "$HERE/.setup-script.sh" "$HERE/.setup-script-cut.sh"
+  done_scenario
+}
+
 # --- main ------------------------------------------------------------------------
 
 [ "$(id -u)" = 0 ] || { echo "run as root (privileged containers)"; exit 2; }
 build_images || { echo "could not build the test images; see $LOG"; exit 2; }
-want=("$@"); [ ${#want[@]} -gt 0 ] || want=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20)
+want=("$@"); [ ${#want[@]} -gt 0 ] || want=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21)
 for n in "${want[@]}"; do "s$n"; done
 echo; echo "== $PASS passed, $FAIL failed, $SKIP skipped (log: $LOG)"; printf '   %s\n' "${RESULTS[@]}"
 [ "$FAIL" = 0 ]

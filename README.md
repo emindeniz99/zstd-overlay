@@ -49,11 +49,13 @@ A VM restore keeps files but drops every mount, so the folders must be mounted a
 
 To change the reserve or the image's place, set `ZSTD_OVERLAY_RESERVE_MB` (and the others under Environment in `--help`) in the environment's variables; a session reads them again at every restore. Not tested: a cloud thread in a Claude project, where repository hooks do not run; whether it runs a user-level hook is unknown.
 
-Run `install` from the environment's setup script. This repository is private, so the setup script cannot download the file; paste it in. `build-setup-script.sh` writes the script for a commit: the tool, taken with `git archive` so that `zstd-overlay version` names the commit and its date, wrapped in a heredoc, then `install`:
+Run `install` from the environment's setup script. This repository is private, so the setup script cannot download the file; paste it in. `build-setup-script.sh` writes the script for a commit:
 
 ```bash
 projects/zstd-overlay/build-setup-script.sh > setup-script.sh    # HEAD; or name a commit
 ```
+
+The setup script field has a size limit of about 64 KB, which the plain file reached (64,286 bytes at `ca8178c`), so the script carries the tool xz-compressed and base64-encoded, about 27 KB, and decodes it with `python3`, which the tool needs anyway. Before it runs `install` it checks the decoded file's SHA-256 against the one in its header: a truncated or altered paste stops with a message and installs nothing (scenario 21). The tool is taken with `git archive`, so that `zstd-overlay version` names the commit and its date.
 
 `zstd-overlay version` prints the installed file's hash, the commit and the commit date; `doctor` adds when the file was installed, which is when the environment cache was built or the session updated by hand. A file taken from a checkout with `git show` or `cp` carries no commit and says `working copy`; its hash also differs from the built one by that line.
 
@@ -94,6 +96,8 @@ python3 /tmp/zstd-overlay install && zstd-overlay up && zstd-overlay doctor
 - **The image lives on the VM.** When the platform reclaims a VM, the image goes with it, like everything not pushed.
 - After a delete in a full image, btrfs takes up to about 15 seconds to offer the space again.
 - **A delete on the normal disk while unmounted can be undone.** If the session had changed that file too, the image's version shows after the mount. No write is lost or hidden; the delete is.
+- **The image is one file.** Every mounted folder's writes live in it, so a VM stop that cuts a btrfs write half way could leave its newest tree root unreadable. Two things keep that from losing the image: the image's blocks are allocated up front, so the normal disk's metadata for it never changes under a write; and `up` retries a failed mount with `usebackuproot`, which mounts the newest of the older roots btrfs keeps, reporting that the last seconds before the stop may be missing. Not reproduced: no stop in two days of sessions damaged the image.
+- **The conflict check trusts the clock.** A write made while unmounted is found by its ctime against the time of the last mount; a clock set back across a resume could make such a write look old. A cloud VM takes its clock from the host, which does not go back.
 - **Nothing can mount earlier than the hook.** The setup script runs only when the environment cache is built, not on resume, and the VM has no init system to hook into (PID 1 is `process_api`).
 - **Until the hook runs, the default home folders are empty.** Their contents are in the image, which is not mounted yet after a resume. Claude Code itself is not there (`/opt/claude-code`), and the platform's git and npm are in `/usr` and `/opt`. What does break is anything that runs before or beside the hook from `~/.local/bin` or a toolchain folder: an MCP server started with `uvx`, or another SessionStart hook that calls `uv`, `mise` or `cargo` (hooks run in parallel). Such a hook can run `zstd-overlay up` first; it waits for the lock and returns once the folders are mounted.
 
@@ -134,5 +138,6 @@ Each scenario runs in its own privileged Ubuntu 24.04 container. The containers 
 | 18 | a migration killed after the original was moved aside (each step, as a VM pause during the first start could leave it): `up` puts the original back, migrates again, content intact, nothing left over |
 | 19 | upgrade from `94085a131cbe`: a leftover below a cache does not roll the image's newer version back; `up \| tail` names no process |
 | 20 | the session edits `CLAUDE.md` and `.claude/settings.json`: on the next mount they go back to the normal disk and out of the image, Claude is told to read `CLAUDE.md` again, the start after that reads them current, code stays in the image, a real conflict still refuses |
+| 21 | the built setup script: installs from the paste, `version` names the commit, a truncated paste exits non-zero and installs nothing |
 
 Last results: [`docs/evidence/2026-11-02-cloud-session-measurements.md`](docs/evidence/2026-11-02-cloud-session-measurements.md#test-results).

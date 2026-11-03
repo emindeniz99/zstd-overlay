@@ -144,3 +144,7 @@ The review's fixes (`70a5063`, `02491ba`): 20 of 20 scenarios; 81 unit tests on 
 **The loop device cached the image twice.** With `/sys/block/loop0/loop/dio` at 0, reading a 1 GiB file from the image grew `Cached` in `/proc/meminfo` by 2,055 MiB (after `echo 3 > drop_caches`): the backing file's pages and btrfs's. With `losetup --direct-io=on` on the live device it grew by 1,025 MiB, and the cold read took 0.55 s instead of 0.73 s. The tool now sets direct I/O (`LOOP_SET_DIRECT_IO`) when it mounts the image.
 
 **The normal disk has no journal.** The kernel log shows `EXT4-fs (vda): mounted filesystem ... r/w without journal`. So an abrupt stop loses the same window outside the image as inside it (both flush every 30 s), and only the image is guaranteed consistent afterwards.
+
+**The setup script reached the paste field's limit.** The plain script was 64,286 bytes at `ca8178c` (the tool 63,950: 53,713 of code, 10,227 of blob). Compressed whole with xz -9e it is 19,228 bytes, 25,640 in base64; zlib 9 gives 20,844 and 27,792. The built script, xz in base64 with a header and a Python decoder that checks the SHA-256, is 27,211 bytes. Scenario 21 runs it in a fresh container and runs a copy cut 3,000 bytes short, which exits non-zero and installs nothing.
+
+The run of this change: 21 of 21 scenarios, 85 unit tests on Python 3.11 to 3.15.
