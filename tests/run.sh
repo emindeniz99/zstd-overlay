@@ -202,7 +202,13 @@ s5() {
   # kill -9 in the middle of the copy, then check nothing was lost
   x 'mkdir -p /root/.gradle && for i in $(seq 1 40); do yes "g$i" | head -c 20M > /root/.gradle/f$i; done' >/dev/null
   before=$(x 'cd /root/.gradle && find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-16')
-  x "$ZO migrate /root/.gradle >/dev/null 2>&1 & sleep 1.5; pkill -9 -f 'zstd-overlay migrate'; sleep 1; true" >/dev/null
+  # Kill once the copy has started: the migrating layer exists and holds files. The patterns
+  # match the python3 process and its cp child, not this bash -c, whose command line has both.
+  x "$ZO migrate /root/.gradle >/dev/null 2>&1 &
+     for i in \$(seq 1500); do [ -n \"\$(ls -A /mnt/zstd-overlay/upper/%root%.gradle.migrating 2>/dev/null)\" ] && break; sleep 0.02; done
+     pkill -9 -f '^python3 [^ ]*zstd-overlay migrate'; pkill -9 -x cp; sleep 1; true" >/dev/null
+  check "killed in the middle of the copy" eq "$(x 'ls /mnt/zstd-overlay/upper/%root%.gradle.migrating | wc -l' | awk '{print ($1 > 0 && $1 < 40)}')" 1
+  check "no migrate or cp left running" eq "$(x 'pgrep -f "^python3 [^ ]*zstd-overlay migrate|^cp -a" | wc -l')" 0
   check "after kill -9: content intact" eq "$(x 'cd /root/.gradle && find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-16')" "$before"
   restart
   out=$(x "$ZO migrate /root/.gradle; echo exit=\$?")
@@ -277,16 +283,14 @@ s9() {
     echo "    SKIP  mise could not be downloaded (network)"; SCN_SKIP=1; done_scenario; return
   fi
   xs "$ZO up"
-  # docker cp writes from the host side, under the container's mounts; copy inside instead.
-  docker cp "$PROJ/../adagia" "$CT:/stage-adagia" 2>>"$LOG"; docker cp "$PROJ/../devlock" "$CT:/stage-devlock" 2>>"$LOG"
-  xs 'cp -a /stage-adagia /work/adagia && cp -a /stage-devlock /work/devlock'
+  xs 'cp -a /src/tests/fixtures/node-app /work/node-app && cp -a /src/tests/fixtures/py-app /work/py-app'
   local out
-  out=$(x 'export PATH=/root/.local/bin:$PATH; cd /work/adagia && mise trust -q . && mise install -q && mise exec -- node --version && mise exec -- pnpm --version && mise exec -- pnpm install --frozen-lockfile >/dev/null && echo pnpm-ok')
+  out=$(x 'export PATH=/root/.local/bin:$PATH; cd /work/node-app && mise trust -q . && mise install -q && mise exec -- node --version && mise exec -- pnpm --version && mise exec -- pnpm install >/dev/null && echo pnpm-ok')
   check "node 24 + pnpm 12 + pnpm install" has "$out" "pnpm-ok"
-  out=$(x 'export PATH=/root/.local/bin:$PATH; cd /work/devlock && mise trust -q . && mise install -q && mise exec -- uv sync --locked >/dev/null 2>&1 && mise exec -- uv run python -c "print(\"py-ok\")"')
+  out=$(x 'export PATH=/root/.local/bin:$PATH; cd /work/py-app && mise trust -q . && mise install -q && mise exec -- uv sync >/dev/null 2>&1 && mise exec -- uv run python -c "import six; print(\"py-ok\")"')
   check "uv + Python + uv sync" has "$out" "py-ok"
   check "mise installs live in the image" has "$(x 'ls /mnt/zstd-overlay/upper/%root%.local%share/mise/installs')" "node"
-  check "node_modules lives in the image" eq "$(x 'ls -d /mnt/zstd-overlay/upper/%work/adagia/node_modules | wc -l')" 1
+  check "node_modules lives in the image" eq "$(x 'ls -d /mnt/zstd-overlay/upper/%work/node-app/node_modules | wc -l')" 1
   done_scenario
 }
 
@@ -321,7 +325,7 @@ s11() {
   start s11
   xs "$ZO install"
   local out
-  out=$(x 'cd /work/repo && ANTHROPIC_API_KEY=sk-ant-invalid timeout 90 claude -p "say hi" --max-turns 1 2>&1 | tail -2; echo; echo exit=$?')
+  out=$(x 'cd /work/repo && ANTHROPIC_API_KEY=sk-ant-invalid timeout 90 claude -p "say hi" --max-turns 1 2>&1 | tail -2; echo "exit=${PIPESTATUS[0]}"')
   echo "    info  claude: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"
   check "after claude started: the folder holding the repo is mounted (hook ran with CLAUDE_PROJECT_DIR)" \
     eq "$(x 'findmnt -rn -t overlay -o TARGET | grep -cx /work')" 1

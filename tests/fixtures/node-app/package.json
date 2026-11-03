@@ -1,0 +1,7 @@
+{
+  "name": "zstd-overlay-node-fixture",
+  "private": true,
+  "dependencies": {
+    "is-number": "7.0.0"
+  }
+}
