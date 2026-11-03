@@ -108,6 +108,7 @@ s1() {
   check "the image reserves its whole capacity on disk ($img of $cap MiB)" lt $((cap - img)) 64
   check "4 GiB stay free outside the image ($avail MiB)" lt $(( (avail - 4096) * (avail - 4096) )) $((300 * 300))
   check "doctor without CLAUDE_PROJECT_DIR still lists the mounted repo folder" has "$(x "env -u CLAUDE_PROJECT_DIR $ZO doctor")" "ok        /work"
+  check "the loop device reads the image directly (cached once in memory)" eq "$(x 'cat /sys/block/$(findmnt -rn -o SOURCE /mnt/zstd-overlay | sed s,/dev/,,)/loop/dio')" 1
   check "no btrfs-progs in the container" eq "$(x 'command -v mkfs.btrfs btrfs | wc -l')" 0
   done_scenario
 }
@@ -134,6 +135,7 @@ s3() {
   local out; out=$(x "$ZO up; echo exit=\$?")
   check "up after restart exits 0" has "$out" "exit=0"
   check "5 overlays again" eq "$(mounts)" 5
+  check "direct I/O again after the restart" eq "$(x 'cat /sys/block/$(findmnt -rn -o SOURCE /mnt/zstd-overlay | sed s,/dev/,,)/loop/dio')" 1
   check "data.bin back, same bytes" eq "$(x 'sha256sum /work/repo/data.bin | cut -c1-16')" "$sum"
   check "git history back" has "$(x 'git -C /work/repo log --oneline')" "one"
   done_scenario

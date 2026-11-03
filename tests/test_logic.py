@@ -765,3 +765,8 @@ def test_flags_may_follow_the_folders(monkeypatch):
     assert zo.main(["up", "/work", "--merge"]) == 0
     assert seen == [(["/work"], True)]
     assert zo.main(["up", "--mrege", "/work"]) == 2
+
+
+def test_direct_io_on_something_that_is_not_a_loop_device_reports_false():
+    # A refusal is reported, not raised: the image works without it, only cached twice.
+    assert zo.loop_direct_io("/dev/null") is False
