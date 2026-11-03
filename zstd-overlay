@@ -30,8 +30,10 @@ A VM restore drops every mount, so `install` runs `up --hook` from a
 SessionStart hook. No write made while a folder was not mounted is hidden under
 the image: where the image has its own version of such a file, the folder that
 holds the repositories is not mounted (`up` names the files and leaves it on
-the normal disk until you decide) and a cache folder takes the newer file.
-Each repository's .git stays on the normal disk, bind-mounted into the folder.
+the normal disk until you decide). A cache folder stays empty on the normal
+disk: what is written there while unmounted moves into the image before the
+mount. Each repository's .git stays on the normal disk, bind-mounted into the
+folder.
 
 The image reserves its disk space up front (fallocate), leaving
 ZSTD_OVERLAY_RESERVE_MB free outside it. A disk that fills from outside then
@@ -582,17 +584,18 @@ class Session:
             merge_tree(os.path.join(root, name), inner)
             shutil.rmtree(os.path.join(root, name))
             shutil.rmtree(os.path.join(self.cfg.mnt, "work", name), ignore_errors=True)
-            for stamp in (self.stamp(inner), self.stamp(inner) + ".migrated"):
+            for stamp in (self.stamp(inner),):
                 with contextlib.suppress(FileNotFoundError):
                     os.unlink(stamp)
             self.say(f"folded the earlier layer of {inner} into the normal disk (newer files win)")
 
     def mount_dir(
-        self, path: str, merge: bool = False, lenient: bool = False, quiet: bool = False, recover: bool = True
+        self, path: str, merge: bool = False, cache: bool = False, quiet: bool = False, recover: bool = True
     ) -> bool:
-        """Mount `path`. A file the image would hide is a conflict: for `merge` the normal disk's
-        version wins; for a `lenient` folder (a cache) the newer version wins; otherwise the
-        folder is refused and stays on the normal disk."""
+        """Mount `path`. For a `cache` folder, first move everything the normal disk holds there
+        into the image, so the folder below the mount is always empty. Otherwise a file the
+        image would hide is a conflict: with `merge` the normal disk's version wins; without,
+        the folder is refused and stays on the normal disk."""
         cfg = self.cfg
         mounted = our_overlays(mounts_now(), cfg.mnt)
         if path in mounted:
@@ -605,11 +608,20 @@ class Session:
         os.makedirs(path, exist_ok=True)
         key, upper = key_of(path), self.upper(path)
         self.fold_nested_layers(path)
-        repos = not lenient  # repositories' .git is kept out of the image; caches go in whole
+        repos = not cache  # repositories' .git is kept out of the image; caches go in whole
         if repos:
             self.move_git_out(path)
+        else:
+            # Whatever was written here while unmounted (the first time: everything the cloud
+            # image ships; on a resume: what npm, MCP servers and Claude Code wrote before the
+            # hook) is the newest, and nothing reads it but the tool that wrote it. It goes into
+            # the image, and the folder below the mount stays empty: no conflicts, and no
+            # reflink from the lower layer, which overlayfs refuses (EXDEV) and uv stops on.
+            n, size = absorb(path, upper)
+            if n:
+                self.say(f"moved {n} files ({gib(size)}) from the normal disk into the image: {path}")
         hidden = self.hidden(path, repos)
-        if hidden and not (merge or lenient):
+        if hidden and not merge:
             self.refuse(f"NOT MOUNTED: {path} changed while it was not mounted; mounting would hide these:")
             for p in hidden[:20]:
                 self.say(f"    {p}")
@@ -617,10 +629,8 @@ class Session:
                 self.say(f"    ... and {len(hidden) - 20} more")
             self.say(f"  it stays on the normal disk. Keep those changes: zstd-overlay up --merge {path}")
             return False
-        if lenient:  # a cache: keep the image's version where it is the newer one
-            hidden = [p for p in hidden if newer_than_upper(p, os.path.join(upper, os.path.relpath(p, path)))]
         aside = None
-        if hidden:  # set the winning files aside, mount, put them back on top
+        if hidden:  # --merge: set the normal disk's files aside, mount, put them back on top
             aside = tempfile.mkdtemp(dir=cfg.mnt, prefix="merge.")
             for p in hidden:
                 rel = os.path.relpath(p, path)
@@ -649,7 +659,7 @@ class Session:
         if aside:
             run("cp", "-a", f"{aside}/.", f"{path}/")
             shutil.rmtree(aside)
-            self.say(f"merged {len(hidden)} changed files into {path} ({'newer wins' if lenient else 'yours win'})")
+            self.say(f"merged {len(hidden)} changed files into {path} (the normal disk's versions win)")
         Path(self.stamp(path)).touch()
         if not quiet:
             self.say(f"compressed: {path}")
@@ -665,10 +675,13 @@ class Session:
         lower_dev = os.stat(os.path.dirname(path)).st_dev
         names = []
         mine = ancestors(os.getpid())  # this process and the shell or hook runner that started it
+        group = os.getpgrp()  # and the rest of its pipeline (`zstd-overlay up | tail`)
         for pid in filter(str.isdigit, os.listdir("/proc")):
             if int(pid) in mine:
                 continue
             try:
+                if os.getpgid(int(pid)) == group:
+                    continue
                 if os.readlink(f"/proc/{pid}/exe").endswith("/claude"):
                     continue
                 cwd = os.readlink(f"/proc/{pid}/cwd")
@@ -691,9 +704,9 @@ class Session:
             raise Stop("--merge needs the folders to merge")
         self.mount_image()
         keep, refused = resolve(dirs or default_dirs(self.cfg))
-        # The default home folders are caches and toolchains: a conflict there resolves to the
-        # newer file. The folder holding the repositories, and any folder named on the command
-        # line, stay strict: a conflict refuses the folder.
+        # The default home folders are caches and toolchains: what is written there while
+        # unmounted moves into the image. The folder holding the repositories, and any folder
+        # named on the command line, stay strict: a conflict refuses the folder.
         caches = (
             set()
             if dirs
@@ -703,18 +716,7 @@ class Session:
         for r in refused:
             self.refuse(r)
         for d in keep:
-            if not self.recover_migration(d):  # before looking at what the folder holds
-                continue
-            marker = self.stamp(d) + ".migrated"
-            if d in caches and not os.path.exists(marker) and d not in our_overlays(mounts_now(), self.cfg.mnt):
-                # The first mount of a cache moves what it already holds into the image: a tool
-                # cloning (reflinking) one of those files would otherwise fail with EXDEV, as
-                # overlayfs cannot reflink from the lower layer; uv does, and stops.
-                empty = not os.path.isdir(d) or not os.listdir(d)
-                if self.mount_dir(d, lenient=True) if empty else self.migrate_one(d, lenient=True):
-                    Path(marker).touch()
-                continue
-            self.mount_dir(d, merge, lenient=d in caches)
+            self.mount_dir(d, merge, cache=d in caches)
 
     def migrate(self, dirs: list[str]) -> None:
         if not dirs:
@@ -730,7 +732,7 @@ class Session:
                 continue
             self.migrate_one(d)
 
-    def migrate_one(self, d: str, lenient: bool = False) -> bool:
+    def migrate_one(self, d: str) -> bool:
         """Move what `d` holds on the normal disk into the image, verified before anything is
         deleted. True when `d` ends up mounted with nothing left below it."""
         cfg = self.cfg
@@ -740,7 +742,7 @@ class Session:
         if not os.path.isdir(d):
             self.say(f"skipped: {d} does not exist")
             return False
-        if not self.mount_dir(d, lenient=lenient, quiet=True):
+        if not self.mount_dir(d, quiet=True):
             return False
         key = key_of(d)
         new = os.path.join(cfg.mnt, "upper", key + ".migrating")
@@ -767,7 +769,7 @@ class Session:
         with contextlib.suppress(FileNotFoundError):
             os.unlink(self.stamp(d))
         # recover=False: `old` is this migration's own, deleted below once the check passes.
-        if self.mount_dir(d, lenient=lenient, recover=False) and tree_sig(d) == before:
+        if self.mount_dir(d, recover=False) and tree_sig(d) == before:
             shutil.rmtree(old)
             self.say(f"migrated: {d} ({gib(before[1])} now in the image)")
             return True
@@ -824,13 +826,14 @@ class Session:
             print(f"  ok        {d}")
         if not self.cfg.project:
             print("  (CLAUDE_PROJECT_DIR is not set here, so the repository's folder is checked only if mounted)")
+        repo_folder = os.path.realpath(workspace(self.cfg)) if self.cfg.project else ""
         for d in default_dirs(self.cfg):
             d = os.path.realpath(d)
             if d in mounted:
                 continue
             elif why := guard(d, self.cfg, mounted):
                 print(f"  refused   {d} ({why})")
-            elif image and (n := len(self.hidden(d))):
+            elif image and d == repo_folder and (n := len(self.hidden(d))):  # caches never conflict
                 print(
                     f"  CHANGED   {d} ({n} files changed while unmounted that the image would hide; "
                     f"see: zstd-overlay up {d})"
@@ -850,6 +853,51 @@ def ancestors(pid: int) -> set[int]:
             break
         pid = next((int(line.split()[1]) for line in status.splitlines() if line.startswith("PPid:")), 0)
     return found
+
+
+def absorb(lower: str, upper: str) -> tuple[int, int]:
+    """Move everything below `lower` (one filesystem) into `upper`, replacing what upper has at
+    the same path, keeping modes, owners, times, symlinks and hard links; leave `lower` itself
+    empty. Called while the folder is not mounted. Kill-safe: each file is copied before its
+    original is removed, so a kill leaves at most a file in both places, which the next run
+    moves again. Returns (files moved, their bytes)."""
+    dev = os.lstat(lower).st_dev
+    linked: dict[tuple[int, int], str] = {}
+    moved = size = 0
+    for root, dirs, files in os.walk(lower):
+        dirs[:] = [d for d in dirs if os.lstat(os.path.join(root, d)).st_dev == dev]
+        rel = os.path.relpath(root, lower)
+        dst_root = os.path.normpath(os.path.join(upper, rel))
+        if os.path.lexists(dst_root) and not os.path.isdir(dst_root):
+            os.unlink(dst_root)  # a file or a deletion marker (whiteout) where a folder now is
+        if not os.path.isdir(dst_root):
+            os.makedirs(dst_root)
+            st = os.lstat(root)
+            shutil.copystat(root, dst_root, follow_symlinks=False)
+            os.lchown(dst_root, st.st_uid, st.st_gid)
+        for name in [d for d in dirs if os.path.islink(os.path.join(root, d))] + files:
+            src, dst = os.path.join(root, name), os.path.join(dst_root, name)
+            st = os.lstat(src)
+            if os.path.isdir(dst) and not os.path.islink(dst):
+                shutil.rmtree(dst)
+            elif os.path.lexists(dst):
+                os.unlink(dst)
+            # By inode alone: moving the first name already dropped this one's link count.
+            if stat.S_ISREG(st.st_mode) and (st.st_dev, st.st_ino) in linked:
+                os.link(linked[(st.st_dev, st.st_ino)], dst)
+            elif stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode):
+                copy_entry(src, dst)
+                if stat.S_ISREG(st.st_mode) and st.st_nlink > 1:
+                    linked[(st.st_dev, st.st_ino)] = dst
+                size += st.st_size if stat.S_ISREG(st.st_mode) else 0
+            os.unlink(src)  # sockets and fifos are not carried over: they mean nothing without their process
+            moved += 1
+        dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(root, d))]
+    for root, dirs, _ in os.walk(lower, topdown=False):
+        for d in dirs:
+            with contextlib.suppress(OSError):
+                os.rmdir(os.path.join(root, d))
+    return moved, size
 
 
 def newer_than_upper(lower: str, upper: str) -> bool:

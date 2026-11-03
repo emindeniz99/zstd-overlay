@@ -434,3 +434,56 @@ def test_the_hook_does_nothing_outside_a_cloud_session(monkeypatch, capsys):
     monkeypatch.setattr(os, "geteuid", lambda: 1000)
     assert zo.main(["up", "--hook"]) == 0
     assert capsys.readouterr().out == ""
+
+
+# --- caches: what the normal disk holds moves into the image ---------------------------------
+
+
+def test_absorb_empties_the_normal_disk_and_keeps_every_file(tmp_path):
+    # A cache folder below the mount must stay empty: anything written there while unmounted
+    # (npm, MCP servers, Claude Code before the hook) moves into the image, and wins.
+    lower, upper = tmp_path / "lower", tmp_path / "upper"
+    (lower / "_cacache" / "index").mkdir(parents=True)
+    (lower / "_cacache" / "index" / "bucket").write_text("written before the hook")
+    (lower / "_logs").mkdir()
+    (lower / "_logs" / "new.log").write_text("log")
+    (lower / "link").symlink_to("_logs/new.log")
+    os.chmod(lower / "_logs" / "new.log", 0o640)
+    (upper / "_cacache" / "index").mkdir(parents=True)
+    (upper / "_cacache" / "index" / "bucket").write_text("from the session")
+    (upper / "_cacache" / "kept").write_text("only in the image")
+    assert zo.absorb(str(lower), str(upper)) == (3, len("written before the hook") + len("log"))
+    assert list(lower.iterdir()) == []
+    assert (upper / "_cacache" / "index" / "bucket").read_text() == "written before the hook"
+    assert (upper / "_cacache" / "kept").read_text() == "only in the image"
+    assert os.readlink(upper / "link") == "_logs/new.log"
+    assert stat.S_IMODE((upper / "_logs" / "new.log").stat().st_mode) == 0o640
+
+
+def test_absorb_keeps_hard_links_together(tmp_path):
+    # pnpm's store hard-links the same file into several places; one copy, not two.
+    lower, upper = tmp_path / "lower", tmp_path / "upper"
+    (lower / "a").mkdir(parents=True)
+    upper.mkdir()
+    (lower / "a" / "one").write_text("x" * 1000)
+    os.link(lower / "a" / "one", lower / "two")
+    zo.absorb(str(lower), str(upper))
+    assert (upper / "a" / "one").stat().st_ino == (upper / "two").stat().st_ino
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="mknod needs root")
+def test_absorb_replaces_a_deletion_marker(tmp_path):
+    # The session deleted `x`; npm wrote it again before the hook: the new `x` must show.
+    lower, upper = tmp_path / "lower", tmp_path / "upper"
+    lower.mkdir()
+    upper.mkdir()
+    os.mknod(upper / "x", 0o600 | stat.S_IFCHR, 0)
+    (lower / "x").write_text("written again")
+    zo.absorb(str(lower), str(upper))
+    assert (upper / "x").read_text() == "written again"
+
+
+def test_absorb_on_an_empty_folder_does_nothing(tmp_path):
+    (tmp_path / "lower").mkdir()
+    (tmp_path / "upper").mkdir()
+    assert zo.absorb(str(tmp_path / "lower"), str(tmp_path / "upper")) == (0, 0)

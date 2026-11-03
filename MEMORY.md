@@ -8,6 +8,8 @@
 
 ## Decisions
 
+- 2026-11-03: a cache folder stays empty on the normal disk: before each mount, everything there moves into the image (owner: "merging into a cache is silly"). Replaces the newer-wins merge and the one-time migration with its marker; what was written while unmounted is the newest by construction. The repository folder stays strict and keeps its files on the normal disk: Claude Code reads CLAUDE.md, .claude/ and .mcp.json there before the hook, and the platform writes .git.
+
 - 2026-11-03: a conflict is a file written while unmounted that the image also has a version of (it would be hidden); the repository folder refuses on one, the default home folders (caches) take the newer file. Each `.git` stays on the normal disk, bind-mounted: the platform rewrites every `.git/config` on resume, before any hook, so the old rule refused the repository folder on every resume (field report, reproduced as scenario 14).
 
 - 2026-11-02: btrfs `compress-force=zstd:3` under overlayfs, kernel features only: zstd:3 was the best writable ratio per write cost of 15 configurations measured; squashfs/erofs/DwarFS are read-only ([evidence](docs/evidence/2026-11-02-cloud-session-measurements.md)).

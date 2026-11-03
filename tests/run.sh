@@ -390,7 +390,8 @@ s14() {
   check ".git/config keeps the platform's write" eq "$(x 'git -C /work/repo config core.sshCommand')" "platform-wrote-this"
   check ".git/config keeps the session's write" eq "$(x 'git -C /work/repo config branch.main.remote')" "origin"
   check "git metadata stays on the normal disk" eq "$(x 'ls -d /mnt/zstd-overlay/upper/%work/repo/.git 2>/dev/null | wc -l')" 0
-  check "a cache file written on both sides: the newer one wins" eq "$(x 'cat /root/.npm/_cacache/index-v5/aa/bucket')" "two"
+  check "a cache file written on both sides: the one from before the hook wins" eq "$(x 'cat /root/.npm/_cacache/index-v5/aa/bucket')" "two"
+  check "the caches below the mount are empty" eq "$(x 'mkdir -p /tmp/r && mount --bind / /tmp/r && ls -A /tmp/r/root/.npm /tmp/r/root/.cache | grep -vc "^/\|^$"; umount /tmp/r')" 0
   check "new log files from both sides are all there" eq "$(x 'ls /root/.npm/_logs /root/.cache/cc/mcp-logs | grep -cE "[.](log|jsonl)$"')" 4
   check "git works: status, commit" xs "cd /work/repo && git status --short >/dev/null && echo more >> notes.txt && $commit -am more"
   # Still strict for work: a file the session wrote, changed again on the normal disk, is refused.
@@ -427,24 +428,25 @@ s15() {
 }
 
 s16() {
-  scenario 16 "a cache that was full before the first mount moves into the image once"
+  scenario 16 "a cache folder below the mount stays empty: its files move into the image"
   start s16
   # What a cloud image ships in ~/.cache, ~/.local/share and the rest is on the normal disk.
   xs 'mkdir -p /root/.cache/uv/archive && head -c 5M /dev/urandom > /root/.cache/uv/archive/pkg.whl && yes cache | head -c 50M > /root/.cache/big.txt'
   local out; out=$(x "$ZO up; echo exit=\$?")
   check "up exits 0" has "$out" "exit=0"
-  check "it says it moved the cache" has "$out" "migrated: /root/.cache"
+  check "it says it moved the cache" has "$out" "from the normal disk into the image: /root/.cache"
   # uv clones (reflinks) cached files; overlayfs refuses that from the lower layer (EXDEV), which stopped uv.
   check "a reflink from a file the cache held before works" xs 'cp --reflink=always /root/.cache/uv/archive/pkg.whl /root/.cache/uv/clone.whl'
   check "nothing is left of it on the normal disk" eq "$(x 'mkdir -p /tmp/r && mount --bind / /tmp/r && ls -A /tmp/r/root/.cache | wc -l; umount /tmp/r')" 0
   check "the content is intact" eq "$(x 'wc -c < /root/.cache/big.txt')" 52428800
   out=$(x "$ZO up; echo exit=\$?")
-  check "a second up moves nothing" eq "$(printf '%s\n' "$out" | grep -c migrated)" 0
+  check "a second up moves nothing" eq "$(printf '%s\n' "$out" | grep -c 'into the image')" 0
   restart
   xs 'echo r > /root/.cache/written-before-the-hook.log'
   out=$(x "$ZO up --hook; echo exit=\$?")
-  check "after a restart: mounted, nothing moved again" eq "$(printf '%s\n' "$out" | grep -c 'migrated\|not compressed'):$(mounts)" "0:5"
+  check "after a restart: the write from before the hook moves in, nothing refused" eq "$(printf '%s\n' "$out" | grep -c 'moved 1 files'):$(printf '%s\n' "$out" | grep -c 'not compressed'):$(mounts)" "1:0:5"
   check "the write from before the hook shows" eq "$(x 'cat /root/.cache/written-before-the-hook.log')" "r"
+  check "the normal disk below the cache is empty again" eq "$(x 'mkdir -p /tmp/r && mount --bind / /tmp/r && ls -A /tmp/r/root/.cache | wc -l; umount /tmp/r')" 0
   done_scenario
 }
 
@@ -492,7 +494,7 @@ s18() {
     [ $step = swapped ] && xs "rm -rf $U && mv $U.migrating $U"
     local out; out=$(x "$ZO up; echo exit=\$?")
     check "killed after '$step': up recovers and says so" has "$out" "recovered an interrupted migration of /root/.gradle"
-    check "killed after '$step': then migrates and exits 0" has "$out" $'migrated: /root/.gradle'
+    check "killed after '$step': then moves it into the image" has "$out" $'into the image: /root/.gradle'
     check "killed after '$step': content intact" eq "$(x "$sum")" "$before"
     check "killed after '$step': nothing left over" eq "$(x "ls -d /root/.gradle.zstd-overlay-old $U.migrating 2>/dev/null | wc -l")" 0
     xs 'umount /root/.gradle 2>/dev/null; true'
