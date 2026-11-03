@@ -617,7 +617,8 @@ class Session:
             # hook) is the newest, and nothing reads it but the tool that wrote it. It goes into
             # the image, and the folder below the mount stays empty: no conflicts, and no
             # reflink from the lower layer, which overlayfs refuses (EXDEV) and uv stops on.
-            n, size = absorb(path, upper)
+            stamp = self.stamp(path)
+            n, size = absorb(path, upper, os.stat(stamp).st_mtime_ns if os.path.exists(stamp) else None)
             if n:
                 self.say(f"moved {n} files ({gib(size)}) from the normal disk into the image: {path}")
         hidden = self.hidden(path, repos)
@@ -855,12 +856,15 @@ def ancestors(pid: int) -> set[int]:
     return found
 
 
-def absorb(lower: str, upper: str) -> tuple[int, int]:
-    """Move everything below `lower` (one filesystem) into `upper`, replacing what upper has at
-    the same path, keeping modes, owners, times, symlinks and hard links; leave `lower` itself
-    empty. Called while the folder is not mounted. Kill-safe: each file is copied before its
-    original is removed, so a kill leaves at most a file in both places, which the next run
-    moves again. Returns (files moved, their bytes)."""
+def absorb(lower: str, upper: str, mounted_ns: int | None = None) -> tuple[int, int]:
+    """Move everything below `lower` (one filesystem) into `upper`, keeping modes, owners,
+    times, symlinks and hard links; leave `lower` itself empty. Called while the folder is not
+    mounted. A file written after the last mount (ctime newer than `mounted_ns`) replaces the
+    image's version: it is the newest. A file that was already there at the last mount, and
+    that the image also has, is a leftover the image's version had superseded (94085a131cbe's
+    merge left such copies); it is removed. Kill-safe: each file is copied before its original
+    is removed, so a kill leaves at most a file in both places, which the next run moves again.
+    Returns (files moved, their bytes)."""
     dev = os.lstat(lower).st_dev
     linked: dict[tuple[int, int], str] = {}
     moved = size = 0
@@ -878,6 +882,9 @@ def absorb(lower: str, upper: str) -> tuple[int, int]:
         for name in [d for d in dirs if os.path.islink(os.path.join(root, d))] + files:
             src, dst = os.path.join(root, name), os.path.join(dst_root, name)
             st = os.lstat(src)
+            if mounted_ns is not None and st.st_ctime_ns <= mounted_ns and os.path.lexists(dst):
+                os.unlink(src)  # a leftover from before the last mount: the image's version is newer
+                continue
             if os.path.isdir(dst) and not os.path.islink(dst):
                 shutil.rmtree(dst)
             elif os.path.lexists(dst):

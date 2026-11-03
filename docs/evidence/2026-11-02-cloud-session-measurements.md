@@ -126,3 +126,9 @@ The full run of `9eb3465` (scenarios 1 to 18): 18 of 18 scenarios, 128 of 128 ch
 - **This session** resumed at 06:37 with `94085a131cbe` installed. The hook mounted all 13 folders, refused nothing and migrated nothing again; the repository was clean at `1467765` and `git fsck` passed.
 
 The full run of `c9776ba` (cache folders kept empty on the normal disk): 18 of 18 scenarios, 130 of 130 checks passed; 63 unit tests on Python 3.11 to 3.15.
+
+## dd120d5f875d on resume, and the upgrade leftover, 2026-11-03
+
+- This session resumed on `dd120d5f875d`: the hook moved 16 files into the image from below `~/.cache` (Claude Code's MCP logs) and 3 from below `~/.local/share`, mounted all 13 folders and refused nothing.
+- The other session reported its 07:15 resume on `94085a131cbe` clean (no `NOT MOUNTED`), then installed `dd120d5f875d` by hand and simulated a resume of `~/.npm`: 12,857 files (0.2 GiB) moved in, none left below, 13,429 visible as before, `npm cache verify` passed (563 content, 606 index entries), `git fsck` clean, normal disk free 3.8 -> 4.3 GB.
+- Its edge case: those 12,852 files below `~/.npm` were copies `94085a131cbe`'s merge had left behind, not writes made while unmounted, and `absorb` let them replace the image's versions. Harmless for npm's content-addressed cache, but an index entry appended while mounted could have been rolled back. `absorb` now drops a file whose ctime predates the last mount when the image has its own version; scenario 19 reproduces the upgrade.

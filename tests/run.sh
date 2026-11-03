@@ -502,11 +502,31 @@ s18() {
   done_scenario
 }
 
+s19() {
+  scenario 19 "upgrade from 94085a131cbe: a leftover below a cache does not roll the image back"
+  start s19
+  xs "$ZO up"
+  xs 'mkdir -p /root/.npm/_cacache/index && echo "appended while mounted" > /root/.npm/_cacache/index/bucket'
+  restart
+  # 94085a131cbe's merge left a copy below the mount, older than the mount that followed it.
+  xs 'mkdir -p /root/.npm/_cacache/index && echo "stale copy" > /root/.npm/_cacache/index/bucket && sleep 1.1
+      '"$ZO"' up /root/.cache >/dev/null && touch /mnt/zstd-overlay/stamps/%root%.npm'   # a later mount, as then
+  local out; out=$(x "$ZO up --hook; echo exit=\$?")
+  check "up exits 0, nothing refused" eq "$(printf '%s\n' "$out" | grep -c 'not compressed'):$(printf '%s\n' "$out" | tail -1)" "0:exit=0"
+  check "the image's newer version stays" eq "$(x 'cat /root/.npm/_cacache/index/bucket')" "appended while mounted"
+  check "the leftover is gone from below the mount" eq "$(x 'mkdir -p /tmp/r && mount --bind / /tmp/r && ls -A /tmp/r/root/.npm | wc -l; umount /tmp/r')" 0
+  # `up | tail` from inside the repository: the pipe is up's own, not a process to restart.
+  restart
+  out=$(x "cd /work/repo && $ZO up | tail -40")
+  check "up | tail: no process named as started before the mount" eq "$(printf '%s\n' "$out" | grep -c 'started earlier')" 0
+  done_scenario
+}
+
 # --- main ------------------------------------------------------------------------
 
 [ "$(id -u)" = 0 ] || { echo "run as root (privileged containers)"; exit 2; }
 build_images || { echo "could not build the test images; see $LOG"; exit 2; }
-want=("$@"); [ ${#want[@]} -gt 0 ] || want=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18)
+want=("$@"); [ ${#want[@]} -gt 0 ] || want=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19)
 for n in "${want[@]}"; do "s$n"; done
 echo; echo "== $PASS passed, $FAIL failed, $SKIP skipped (log: $LOG)"; printf '   %s\n' "${RESULTS[@]}"
 [ "$FAIL" = 0 ]

@@ -22,6 +22,8 @@
 
 ## Learnings
 
+- 2026-11-03: 94085a131cbe's newer-wins merge copied files into the image but left them below the mount (12,852 under ~/.npm); absorb then took those stale copies for new writes. absorb now drops a file that predates the last mount when the image has its own version (field report, scenario 19).
+
 - 2026-11-03: a killed migration that had already renamed the original to `.zstd-overlay-old` left the folder looking empty and the next migrate crashed (ENOTEMPTY); no data lost. Fix: recover before mounting (scenario 18). The first version of that recovery also fired inside migrate's own final mount and undid it; migrate's remount now skips recovery.
 
 - 2026-11-03: a running session never gets a changed setup script (it runs only for the environment cache); update it by hand. A session still on dd94e60 keeps the repository's own layer (%home%user%playground) while the new default mounts /home/user, so `up` folds nested old layers into the normal disk (scenario 17).

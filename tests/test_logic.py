@@ -487,3 +487,22 @@ def test_absorb_on_an_empty_folder_does_nothing(tmp_path):
     (tmp_path / "lower").mkdir()
     (tmp_path / "upper").mkdir()
     assert zo.absorb(str(tmp_path / "lower"), str(tmp_path / "upper")) == (0, 0)
+
+
+def test_absorb_drops_a_leftover_the_image_had_superseded(tmp_path):
+    # 94085a131cbe's merge copied files into the image but left them below the mount too; the
+    # session then appended to the image's copy. After an upgrade, the leftover must not win.
+    lower, upper = tmp_path / "lower", tmp_path / "upper"
+    (lower / "index").mkdir(parents=True)
+    (upper / "index").mkdir(parents=True)
+    (lower / "index" / "bucket").write_text("stale copy left below")
+    (lower / "index" / "only-below").write_text("no version in the image")
+    mounted = _stamp_then_wait(tmp_path)  # the last mount, after the leftover was written
+    (upper / "index" / "bucket").write_text("stale copy left below\nappended while mounted")
+    (lower / "index" / "fresh.log").write_text("written after the mount")
+    (upper / "index" / "fresh.log").write_text("older")
+    zo.absorb(str(lower), str(upper), mounted)
+    assert (upper / "index" / "bucket").read_text().endswith("appended while mounted")
+    assert (upper / "index" / "only-below").read_text() == "no version in the image"
+    assert (upper / "index" / "fresh.log").read_text() == "written after the mount"
+    assert list(lower.iterdir()) == []  # nothing left below the mount, the leftover included
