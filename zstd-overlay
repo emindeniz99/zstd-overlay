@@ -493,7 +493,19 @@ class Session:
                     else:  # Python 3.11 before 3.11.4
                         t.extract(member, tmp)
                 os.replace(os.path.join(tmp, "disk.img"), cfg.img)
-        run("mount", "-o", f"loop,{OPTS}", cfg.img, cfg.mnt)
+        try:
+            run("mount", "-o", f"loop,{OPTS}", cfg.img, cfg.mnt)
+        except Stop as first:
+            # A superblock or tree root half-written when the VM stopped: btrfs keeps the last
+            # roots, and usebackuproot mounts the newest one that reads whole.
+            try:
+                run("mount", "-o", f"loop,usebackuproot,{OPTS}", cfg.img, cfg.mnt)
+            except Stop as second:
+                raise Stop(f"the image does not mount: {first}; nor from a backup root: {second}") from None
+            self.say(
+                f"the image did not mount ({first}); mounted from a backup root (usebackuproot), "
+                "so writes from the last seconds before the VM stopped may be missing"
+            )
         for d in ("upper", "work", "stamps"):
             os.makedirs(os.path.join(cfg.mnt, d), exist_ok=True)
         m = mount_at(cfg.mnt)

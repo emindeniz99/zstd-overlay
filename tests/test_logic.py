@@ -785,3 +785,28 @@ def test_version_says_so_when_the_placeholder_was_not_filled_in(capsys):
     out = capsys.readouterr().out
     assert "working copy" in out
     assert "$Format" not in out
+
+
+def test_an_image_that_does_not_mount_is_retried_from_a_backup_root(tmp_path, monkeypatch):
+    # The image is the one place every mounted folder's writes live: when its newest tree root
+    # was cut by an abrupt stop, btrfs's older roots must be tried before giving up.
+    img, mnt = tmp_path / "disk.img", tmp_path / "mnt"
+    img.write_bytes(b"")
+    cfg = zo.Config(img=str(img), mnt=str(mnt), reserve=0, home="/root", project="")
+    calls: list[tuple[str, ...]] = []
+
+    def run(*cmd):
+        calls.append(cmd)
+        if len(calls) == 1:
+            raise zo.Stop("mount: wrong fs type, bad option, bad superblock")
+
+    mounted = zo.parse_mountinfo(f"90 22 7:2 / {mnt} rw,noatime - btrfs /dev/loop2 rw\n")
+    monkeypatch.setattr(zo, "run", run)
+    monkeypatch.setattr(zo, "mount_at", lambda t: mounted[0] if calls else None)
+    monkeypatch.setattr(zo.Session, "direct_io", lambda self, dev: None)
+    monkeypatch.setattr(zo.Session, "fit_image", lambda self: None)
+    s = zo.Session(cfg, quiet=True)
+    s.mount_image()
+    assert "usebackuproot" in calls[1][2]
+    assert any("backup root" in line for line in s.lines)
+    assert s.refused == 0
