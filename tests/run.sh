@@ -564,7 +564,7 @@ s21() {
   local built="$HERE/.setup-script.sh"
   if ! "$PROJ/build-setup-script.sh" HEAD > "$built" 2>>"$LOG"; then echo "    SKIP  build-setup-script.sh failed (see log)"; SCN_SKIP=1; CT=""; done_scenario; return; fi
   start s21
-  check "the built script is under 32 KB (the paste field's limit is about 64 KB)" lt "$(wc -c < "$built")" 32768
+  check "the built script fits the paste field (under 64 KiB)" lt "$(wc -c < "$built")" 65536
   docker cp "$built" "$CT:/setup-script.sh" 2>>"$LOG"
   local out; out=$(x 'bash /setup-script.sh; echo exit=$?')
   check "the setup script runs install" has "$out" "installed /usr/local/bin/zstd-overlay"
@@ -580,6 +580,7 @@ s21() {
   docker cp "$HERE/.setup-script-cut.sh" "$CT:/setup-script.sh" 2>>"$LOG"
   out=$(x 'bash /setup-script.sh 2>&1; echo exit=$?')
   check "a truncated paste exits non-zero" eq "$(printf '%s\n' "$out" | grep -c 'exit=0')" 0
+  check "and says it is cut short" has "$out" "cut short"
   check "and installs nothing" eq "$(x 'ls /usr/local/bin/zstd-overlay /root/.claude/settings.json 2>/dev/null | wc -l')" 0
   rm -f "$HERE/.setup-script.sh" "$HERE/.setup-script-cut.sh"
   done_scenario

@@ -10,7 +10,7 @@
 
 `zstd-overlay` puts the folders you name on top of a zstd-compressed btrfs image. Writes under those folders land in the image, compressed. What the folders held before stays where it was and stays readable. Programs see plain files, so pnpm, cargo, uv, mise, dotnet and git need no flags.
 
-It is one Python 3.11+ file using only the standard library, and it uses only what the kernel already has: btrfs, overlayfs and loop devices. It resizes btrfs and reserves disk blocks with kernel calls (`BTRFS_IOC_RESIZE`, `fallocate`), so it needs no btrfs-progs. The kernel can mount btrfs but cannot create one, and `mkfs.btrfs` is not installed, so an empty btrfs filesystem (7.5 KB compressed) ships at the end of the file. A cloud session has Python 3.13; a machine without `python3` gets an error from `env` and nothing is mounted.
+It is one Python 3.11+ file using only the standard library, and it uses only what the kernel already has: btrfs, overlayfs and loop devices. It resizes btrfs and reserves disk blocks with kernel calls (`BTRFS_IOC_RESIZE`, `fallocate`), so it needs no btrfs-progs. The kernel can mount btrfs but cannot create one, and `mkfs.btrfs` is not installed, so an empty btrfs filesystem (1.9 KB: its 188 KiB of superblocks and trees, xz-compressed) ships at the end of the file. A cloud session has Python 3.13; a machine without `python3` gets an error from `env` and nothing is mounted.
 
 | Measured in a cloud session (2026-11-02) | Normal size | In the image |
 |---|---|---|
@@ -55,7 +55,7 @@ Run `install` from the environment's setup script. This repository is private, s
 projects/zstd-overlay/build-setup-script.sh > setup-script.sh    # HEAD; or name a commit
 ```
 
-The setup script field has a size limit of about 64 KB, which the plain file reached (64,286 bytes at `ca8178c`), so the script carries the tool xz-compressed and base64-encoded, about 27 KB, and decodes it with `python3`, which the tool needs anyway. Before it runs `install` it checks the decoded file's SHA-256 against the one in its header: a truncated or altered paste stops with a message and installs nothing (scenario 21). The tool is taken with `git archive`, so that `zstd-overlay version` names the commit and its date.
+The script is the tool itself in a heredoc, readable as pasted, then a SHA-256 check and `install`. The field holds about 64 KB and the script is about 58 KB (the builder refuses to produce one over the limit and prints how much room is left). The plain file reached 64,286 bytes at `ca8178c`; shrinking the empty-filesystem blob from 10 KB to 2.6 KB (holes punched, xz instead of gzip) brought it back, and the owner chose that over shipping the file compressed, so that what is pasted can be read (2026-11-03). A paste cut short ends inside the heredoc, so the check and `install` after it never run; a paste altered on the way fails the check; either way nothing is installed (scenario 21). The tool is taken with `git archive`, so that `zstd-overlay version` names the commit and its date.
 
 `zstd-overlay version` prints the installed file's hash, the commit and the commit date; `doctor` adds when the file was installed, which is when the environment cache was built or the session updated by hand. A file taken from a checkout with `git show` or `cp` carries no commit and says `working copy`; its hash also differs from the built one by that line.
 
