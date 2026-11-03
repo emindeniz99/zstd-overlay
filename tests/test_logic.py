@@ -259,9 +259,10 @@ def test_merge_tree_applies_deletes_and_keeps_newer_files(tmp_path):
 @pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
 def test_both_sides_of_git_config_are_kept(tmp_path):
     # The session ran `git push -u` (branch.main.remote); the platform rewrote the file on resume.
-    upper, lower = tmp_path / "upper", tmp_path / "lower"
-    upper.mkdir()
-    lower.mkdir()
+    # move_git_out merges the image's .git onto the normal disk's .git, as here.
+    upper, lower = tmp_path / "upper" / ".git", tmp_path / "lower" / ".git"
+    upper.mkdir(parents=True)
+    lower.mkdir(parents=True)
     (upper / "config").write_text('[core]\n\tbare = false\n[branch "main"]\n\tremote = origin\n')
     os.utime(upper / "config", (1, 1))
     (lower / "config").write_text("[core]\n\tbare = false\n\tsshCommand = platform\n")
@@ -395,3 +396,32 @@ def test_own_shell_is_not_a_stale_process():
     # before the mount but is ours, so `up` must not tell the user to restart it.
     mine = zo.ancestors(os.getpid())
     assert {os.getpid(), os.getppid()} <= mine
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="mknod needs root")
+def test_merge_tree_never_removes_a_newer_file(tmp_path):
+    # Folding an old layer: the session deleted a file then, and wrote it again later on the
+    # normal disk. The later write wins.
+    upper, lower = tmp_path / "upper", tmp_path / "lower"
+    upper.mkdir()
+    lower.mkdir()
+    os.mknod(upper / "notes.txt", 0o600 | stat.S_IFCHR, 0)
+    os.utime(upper / "notes.txt", (1, 1), follow_symlinks=False)
+    (lower / "notes.txt").write_text("written later")
+    zo.merge_tree(str(upper), str(lower))
+    assert (lower / "notes.txt").read_text() == "written later"
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+def test_git_config_below_the_folder_keeps_both_sides(tmp_path):
+    # A repository's own old layer holds .git/config one level down, not at the top.
+    upper, lower = tmp_path / "upper", tmp_path / "lower"
+    (upper / ".git").mkdir(parents=True)
+    (lower / ".git").mkdir(parents=True)
+    (upper / ".git" / "config").write_text('[branch "main"]\n\tremote = origin\n')
+    os.utime(upper / ".git" / "config", (1, 1))
+    (lower / ".git" / "config").write_text("[core]\n\tsshCommand = platform\n")
+    zo.merge_tree(str(upper), str(lower))
+    text = (lower / ".git" / "config").read_text()
+    assert "sshCommand = platform" in text
+    assert "remote = origin" in text

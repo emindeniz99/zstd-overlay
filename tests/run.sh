@@ -448,11 +448,38 @@ s16() {
   done_scenario
 }
 
+s17() {
+  scenario 17 "an old session: dd94e60 mounted the repository itself, then refused it on resume"
+  start s17
+  local commit='git -c user.email=t@t -c user.name=t commit -q'
+  xs "cd /work/repo && git add -A && $commit -m base && $ZO up /root/.cache"   # creates the image
+  # dd94e60 mounted the repository on its own (layer %work%repo) and ~/.npm (same layer name as now).
+  xs "for d in /work/repo /root/.npm; do k=\${d//\//%}; mkdir -p \$d /mnt/zstd-overlay/upper/\$k /mnt/zstd-overlay/work/\$k
+        mount -t overlay overlay -o lowerdir=\$d,upperdir=/mnt/zstd-overlay/upper/\$k,workdir=/mnt/zstd-overlay/work/\$k \$d; touch /mnt/zstd-overlay/stamps/\$k; done
+      cd /work/repo && echo 'first period' > early.txt && echo 'first edit' >> README && git add -A && $commit -m 'first period'
+      mkdir -p /root/.npm/_cacache && echo old > /root/.npm/_cacache/entry"
+  restart
+  # The resume refused both; the session went on working on the normal disk.
+  xs 'sleep 1; cd /work/repo && echo "later edit" > README && echo later > late.txt && git config core.sshCommand platform
+      mkdir -p /root/.npm/_cacache && echo new > /root/.npm/_cacache/entry'
+  local out; out=$(x "$ZO up --hook; echo exit=\$?")
+  check "the new version mounts everything, refuses nothing" eq "$(printf '%s' "$out" | grep -c 'not compressed'):$(mounts)" "0:5"
+  check "it folded the old layer of the repository" has "$out" "folded the earlier layer of /work/repo"
+  check "the later edit wins" eq "$(x 'cat /work/repo/README')" "later edit"
+  check "work from both periods is there" eq "$(x 'cat /work/repo/early.txt /work/repo/late.txt')" $'first period\nlater'
+  check "the first period's commit is there" eq "$(x 'git -C /work/repo log --format=%s -1')" "first period"
+  check "both sides of .git/config" eq "$(x 'git -C /work/repo config core.sshCommand')" "platform"
+  check "git fsck is clean" xs 'git -C /work/repo fsck --no-progress'
+  check "the old layer is gone from the image" eq "$(x 'ls -d /mnt/zstd-overlay/upper/%work%repo 2>/dev/null | wc -l')" 0
+  check "the cache keeps the newer file" eq "$(x 'cat /root/.npm/_cacache/entry')" "new"
+  done_scenario
+}
+
 # --- main ------------------------------------------------------------------------
 
 [ "$(id -u)" = 0 ] || { echo "run as root (privileged containers)"; exit 2; }
 build_images || { echo "could not build the test images; see $LOG"; exit 2; }
-want=("$@"); [ ${#want[@]} -gt 0 ] || want=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16)
+want=("$@"); [ ${#want[@]} -gt 0 ] || want=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17)
 for n in "${want[@]}"; do "s$n"; done
 echo; echo "== $PASS passed, $FAIL failed, $SKIP skipped (log: $LOG)"; printf '   %s\n' "${RESULTS[@]}"
 [ "$FAIL" = 0 ]

@@ -2,7 +2,7 @@
 
 ## Now
 
-- 2026-11-02: Python version: `zstd-overlay` (up, migrate, install, status, doctor), 44 unit tests (`mise run check`, `mise run matrix`) and `tests/run.sh` (13 Docker scenarios). 2026-11-03: works through a real environment's setup script (hook ran at start; 200 MB of text cost 7 MB). Still to observe: the hook on `resume`.
+- 2026-11-02: Python version: `zstd-overlay` (up, migrate, install, status, doctor), 44 unit tests (`mise run check`, `mise run matrix`) and `tests/run.sh` (13 Docker scenarios). 2026-11-03: works through a real environment's setup script (hook ran at start; 200 MB of text cost 7 MB). Hook on `resume` observed working (9fdf465928aa, this session, 05:45).
 - Next: graduate to a public repo so setup scripts can `curl` it (this repo is private).
 
 ## Decisions
@@ -18,6 +18,9 @@
 - 2026-11-02: rewritten from bash to Python 3.11+ stdlib, one file (owner: "a well-tested tool deserves a real language"): unit tests for the logic, no perl/jq fallbacks; a cloud session has Python 3.13. The bash version (0253ed0) passed all 13 scenarios first; the scenarios are language-independent and gate the rewrite.
 
 ## Learnings
+
+- 2026-11-03: a running session never gets a changed setup script (it runs only for the environment cache); update it by hand. A session still on dd94e60 keeps the repository's own layer (%home%user%playground) while the new default mounts /home/user, so `up` folds nested old layers into the normal disk (scenario 17).
+- 2026-11-03: a VM resume stops dockerd too; restart it before `tests/run.sh`.
 
 - 2026-11-03: overlayfs refuses FICLONE from a lower-layer file (EXDEV) while reporting one st_dev; uv 0.13 then stops ("Failed to clone"). Fix: a cache folder's first mount migrates its content into the image (marker `stamps/<key>.migrated`).
 - 2026-11-03: a session that runs zstd-overlay leaves only its reserve (4 GiB) free; Docker tests there need `ZSTD_OVERLAY_RESERVE_MB=16384 zstd-overlay up` first, which shrank the live image 25 -> 13 GB in under a second.

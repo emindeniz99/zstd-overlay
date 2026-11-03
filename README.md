@@ -58,9 +58,17 @@ python3 /tmp/zstd-overlay install
 
 `install` creates no image. The image appears at the first session start, after the environment cache snapshot, so the snapshot holds a few kilobytes instead of a disk image.
 
-Checked on 2026-11-03 in a new environment with this setup script: the snapshot kept the hook, the hook ran at session start and mounted the repository and 8 cache folders, and a 200 MB file of repeated text grew the image by 7 MB. Not observed yet: the hook on `resume` after an idle restore. The platform docs say a cloud session runs hooks from server-managed settings and the repository, and that user-level hooks stay on your machine; the hook in the VM's own `~/.claude/settings.json` ran anyway. If a future session shows nothing mounted, check that first. Run `zstd-overlay doctor` in a session to see the state.
+Checked on 2026-11-03 in a new environment with this setup script: the snapshot kept the hook, the hook ran at session start and mounted the repository and 8 cache folders, and a 200 MB file of repeated text grew the image by 7 MB. On 2026-11-03 the hook also ran on `resume` in a session that had `9fdf465928aa` installed: it moved `.git` out of the image, mounted `/home/user` and the caches without a refusal, and moved 1.8 GB of existing caches into the image; the repository was clean and `git fsck` passed afterwards. The platform docs say a cloud session runs hooks from server-managed settings and the repository, and that user-level hooks stay on your machine; the hook in the VM's own `~/.claude/settings.json` ran anyway. If a future session shows nothing mounted, check that first. Run `zstd-overlay doctor` in a session to see the state.
 
-In a session that started before the hook existed, run `zstd-overlay up` once.
+A session that is already running never sees a changed setup script: the script runs only when the environment cache is built, not on resume. Update such a session by hand, once:
+
+```bash
+git -C /home/user/playground fetch origin claude/zstd-overlay   # or wherever the new file is
+git -C /home/user/playground show origin/claude/zstd-overlay:projects/zstd-overlay/zstd-overlay > /tmp/zstd-overlay
+python3 /tmp/zstd-overlay install && zstd-overlay up && zstd-overlay doctor
+```
+
+`up` folds the layer of any folder an earlier version mounted on its own (versions up to `dd94e60` mounted the repository, later ones the folder holding it) into the normal disk, newer file winning, so nothing written then stays hidden in the image.
 
 ## Safety
 
@@ -115,5 +123,6 @@ Each scenario runs in its own privileged Ubuntu 24.04 container. The containers 
 | 14 | resume with the writes measured before the hook (the platform's `.git/config`, npm's cache and logs, Claude Code's MCP logs): nothing refused, nothing lost; a real conflict in the repository folder still refused |
 | 15 | a `.git` left in the image by an earlier version moves out: commit kept, both sides of `.git/config` kept, `git fsck` clean |
 | 16 | a cache that was full before the first mount moves into the image once: a reflink from its old files works, nothing is left below, a second `up` or a restart moves nothing |
+| 17 | an old session (the repository mounted on its own, then refused on resume): the new version folds the old layer, keeps the later edits and the early commit, refuses nothing |
 
 Last results: [`docs/evidence/2026-11-02-cloud-session-measurements.md`](docs/evidence/2026-11-02-cloud-session-measurements.md#test-results).

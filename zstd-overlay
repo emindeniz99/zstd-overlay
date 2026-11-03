@@ -546,6 +546,25 @@ class Session:
             shutil.rmtree(ug)
             self.say(f"moved {lg} out of the image (git metadata stays on the normal disk)")
 
+    def fold_nested_layers(self, path: str) -> None:
+        """Fold into the normal disk the layer of any folder inside `path` that was mounted on
+        its own before (versions up to dd94e60 mounted the repository, later ones the folder
+        holding it). Its files would otherwise stay in the image, unseen. Newer file wins."""
+        root = os.path.join(self.cfg.mnt, "upper")
+        mounted = our_overlays(mounts_now(), self.cfg.mnt)
+        for name in sorted(os.listdir(root)) if os.path.isdir(root) else []:
+            inner = name.replace("%", "/")
+            if name.endswith(".migrating") or inner == path or not inside(inner, path) or inner in mounted:
+                continue
+            os.makedirs(inner, exist_ok=True)
+            merge_tree(os.path.join(root, name), inner)
+            shutil.rmtree(os.path.join(root, name))
+            shutil.rmtree(os.path.join(self.cfg.mnt, "work", name), ignore_errors=True)
+            for stamp in (self.stamp(inner), self.stamp(inner) + ".migrated"):
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(stamp)
+            self.say(f"folded the earlier layer of {inner} into the normal disk (newer files win)")
+
     def mount_dir(self, path: str, merge: bool = False, lenient: bool = False, quiet: bool = False) -> bool:
         """Mount `path`. A file the image would hide is a conflict: for `merge` the normal disk's
         version wins; for a `lenient` folder (a cache) the newer version wins; otherwise the
@@ -559,6 +578,7 @@ class Session:
             return False
         os.makedirs(path, exist_ok=True)
         key, upper = key_of(path), self.upper(path)
+        self.fold_nested_layers(path)
         repos = not lenient  # repositories' .git is kept out of the image; caches go in whole
         if repos:
             self.move_git_out(path)
@@ -828,14 +848,14 @@ def merge_git_config(upper: str, lower: str) -> None:
 
 
 def merge_tree(upper: str, lower: str) -> None:
-    """Apply an overlay upper tree onto the lower tree it covered: deletions (whiteouts) delete,
-    a replaced folder (opaque) replaces, a file wins unless the lower one is newer; for a
-    repository's `config` both sides' entries are kept."""
+    """Apply an overlay upper tree onto the lower tree it covered, newer file wins: an upper
+    file replaces an older lower one, an upper delete (whiteout) removes an older lower file,
+    and a lower file newer than either stays. A repository's .git/config keeps both sides'
+    entries. Nothing newer on the normal disk is ever removed, so a replaced folder (opaque)
+    merges like any other."""
     for root, dirs, files in os.walk(upper):
         rel = os.path.relpath(root, upper)
         dst_root = os.path.normpath(os.path.join(lower, rel))
-        if rel != "." and is_opaque(root) and os.path.lexists(dst_root):
-            shutil.rmtree(dst_root) if os.path.isdir(dst_root) and not os.path.islink(dst_root) else os.unlink(dst_root)
         if os.path.lexists(dst_root) and not os.path.isdir(dst_root):
             os.unlink(dst_root)
         os.makedirs(dst_root, exist_ok=True)
@@ -843,12 +863,19 @@ def merge_tree(upper: str, lower: str) -> None:
             src, dst = os.path.join(root, name), os.path.join(dst_root, name)
             st = os.lstat(src)
             if is_whiteout(st):
+                if os.path.lexists(dst) and newer_than_upper(dst, src):
+                    continue
                 if os.path.isdir(dst) and not os.path.islink(dst):
                     shutil.rmtree(dst)
                 elif os.path.lexists(dst):
                     os.unlink(dst)
                 continue
-            if rel == "." and name == "config" and os.path.isfile(dst) and newer_than_upper(dst, src):
+            if (
+                name == "config"
+                and os.path.basename(root) == ".git"
+                and os.path.isfile(dst)
+                and newer_than_upper(dst, src)
+            ):
                 merge_git_config(src, dst)
                 continue
             if os.path.lexists(dst) and newer_than_upper(dst, src):
