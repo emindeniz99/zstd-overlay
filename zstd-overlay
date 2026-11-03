@@ -347,6 +347,81 @@ def merge_hook(settings: dict, command: str = HOOK_COMMAND) -> dict:
     return settings
 
 
+def hook_header(
+    version: str, workspace: str, mounted: list[str], used: int | None, free_in: int | None, free_out: int
+) -> list[str]:
+    """What every start tells Claude before the mount lines. A fresh session saw only
+    "compressed: ..." lines and learned the tool from its source (field report, 2026-11-03)."""
+    homes = len([m for m in mounted if m != workspace])
+    if used is None or free_in is None:
+        what = "the image is not mounted, so nothing is compressed this session (see below)"
+    else:
+        if workspace in mounted:
+            where = f"{workspace} and "
+        elif workspace:
+            where = f"{workspace} is NOT compressed (see below); "
+        else:
+            where = ""
+        what = (
+            f"{where}{homes} home folders are compressed (zstd) in an image: "
+            f"{gib(used)} used on disk, {gib(free_in)} free inside it"
+        )
+    return [
+        f"{version}: {what}.",
+        f"Outside the image only {gib(free_out)} is free: /tmp, /var (Docker, apt) and every folder `zstd-overlay "
+        f"doctor` does not list write there, uncompressed. Put large build output and downloads under "
+        f"{workspace or 'a mounted folder'}.",
+        "Each repository's .git stays outside the image by design.",
+        "State and folders: `zstd-overlay doctor`. Never run `zstd-overlay up --merge` unless the user agreed.",
+    ]
+
+
+# What Claude Code loads at a start from STARTUP_FILES, by what a change to it needs.
+INSTRUCTIONS = ("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md")
+
+
+def startup_kind(path: str) -> str | None:
+    """ "read": instructions loaded into this start's context; reading them again applies them.
+    "restart": what the harness loads once (settings, hooks, agents, commands, MCP servers).
+    None: a skill's other files, read fresh when the skill runs."""
+    parts = path.split(os.sep)
+    if ".claude" in parts:
+        sub = parts[parts.index(".claude") + 1 :]
+        if sub[:1] == ["rules"] or (sub[:1] == ["skills"] and sub[-1] == "SKILL.md"):
+            return "read"
+        return None if sub[:1] == ["skills"] else "restart"
+    if parts[-1] in INSTRUCTIONS:
+        return "read"
+    return "restart" if parts[-1] == ".mcp.json" else None
+
+
+def reread_note(written: list[str], deleted: list[str]) -> list[str]:
+    """Name each changed startup file under what Claude has to do about it."""
+
+    def names(paths: list[str]) -> str:
+        return ", ".join(paths[:20]) + (f" and {len(paths) - 20} more" if len(paths) > 20 else "")
+
+    read = [p for p in written if startup_kind(p) == "read"]
+    gone = [p for p in deleted if startup_kind(p) == "read"]
+    later = [p for p in written + deleted if startup_kind(p) == "restart"]
+    lines = []
+    if read:
+        lines.append(
+            "  note for Claude: these instructions changed after this start loaded them; "
+            f"read them again now: {names(read)}"
+        )
+    if gone:
+        lines.append(
+            "  note for Claude: these instructions were deleted after this start loaded them; "
+            f"disregard them: {names(gone)}"
+        )
+    if later:
+        lines.append(
+            f"  note for Claude: these take effect at the next start (the harness loads them once): {names(later)}"
+        )
+    return lines
+
+
 def hook_output(lines: list[str], refused: int) -> str:
     """What `up --hook` prints. Claude Code reads a SessionStart hook's stdout only on exit 0:
     plain text becomes context for Claude; JSON can also warn the user."""
@@ -399,6 +474,11 @@ def fs_size(path: str) -> int:
 def fs_avail(path: str) -> int:
     s = os.statvfs(path)
     return s.f_bavail * s.f_frsize
+
+
+def fs_used(path: str) -> int:
+    s = os.statvfs(path)
+    return (s.f_blocks - s.f_bfree) * s.f_frsize
 
 
 def allocated(path: str) -> int:
@@ -608,12 +688,22 @@ class Session:
                 shown = ", ".join(paths[:6]) + (", ..." if len(paths) > 6 else "")
                 where = "back to" if verb == "wrote" else "on"
                 self.say(f"{verb} {len(paths)} startup files {where} the normal disk: {shown}")
-        if written or deleted:
-            self.say(
-                "  note for Claude: Claude Code loaded the older copies of these at this start. "
-                "Read CLAUDE.md again now; changes to .claude/ settings, hooks, skills and .mcp.json "
-                "take effect at the next start."
-            )
+        for line in reread_note(written, deleted):
+            self.say(line)
+
+    def header(self) -> list[str]:
+        """hook_header with this session's numbers, read after the mounts."""
+        cfg = self.cfg
+        image = mount_at(cfg.mnt) is not None
+        outside = os.path.dirname(cfg.img) if os.path.isdir(os.path.dirname(cfg.img)) else "/"
+        return hook_header(
+            version_line(),
+            os.path.realpath(workspace(cfg)) if cfg.project else "",
+            our_overlays(mounts_now(), cfg.mnt),
+            fs_used(cfg.mnt) if image else None,
+            fs_avail(cfg.mnt) if image else None,
+            fs_avail(outside),
+        )
 
     def move_git_out(self, path: str) -> None:
         """Move each .git found in the image to the normal disk. Versions before 3d7ad8d+1 kept
@@ -1227,6 +1317,10 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         s.refuse(f"stopped: {e}")  # a hook's report reaches Claude only on exit 0
     if hook:
+        try:
+            s.lines[:0] = s.header()
+        except OSError as e:  # the report matters more than the header
+            s.lines.insert(0, f"{version_line()}: could not read the disk's numbers ({e})")
         print(hook_output(s.lines, s.refused))
         return 0
     return 3 if s.refused else 0

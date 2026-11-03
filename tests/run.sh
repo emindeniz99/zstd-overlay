@@ -534,13 +534,24 @@ s20() {
   local below='mkdir -p /tmp/r && mount --bind / /tmp/r && cat /tmp/r/work/repo/CLAUDE.md; umount /tmp/r'
   xs "printf 'as cloned\n' > /work/repo/CLAUDE.md && $ZO up"
   # The session edits its instructions, its settings and some code; then the VM pauses.
-  xs 'echo "edited in the session" > /work/repo/CLAUDE.md && mkdir -p /work/repo/.claude && echo "{\"x\":1}" > /work/repo/.claude/settings.json && echo code > /work/repo/src.py'
+  xs 'echo "edited in the session" > /work/repo/CLAUDE.md && mkdir -p /work/repo/.claude/rules && echo "{\"x\":1}" > /work/repo/.claude/settings.json && echo rule > /work/repo/.claude/rules/commits.md && echo code > /work/repo/src.py'
   restart
   check "before the hook, Claude Code would read the clone's CLAUDE.md" eq "$(x 'cat /work/repo/CLAUDE.md')" "as cloned"
   local out; out=$(x "$ZO up --hook; echo exit=\$?")
   check "up exits 0, nothing refused" eq "$(printf '%s\n' "$out" | grep -c 'not compressed'):$(printf '%s\n' "$out" | tail -1)" "0:exit=0"
-  check "it wrote both files back" has "$out" "wrote 2 startup files back to the normal disk"
-  check "and tells Claude to read CLAUDE.md again" has "$out" "Read CLAUDE.md again now"
+  check "it wrote the three files back" has "$out" "wrote 3 startup files back to the normal disk"
+  check "Claude is told to read the instructions again now, by name" \
+    has "$(printf '%s\n' "$out" | grep 'read them again now')" "/work/repo/.claude/rules/commits.md"
+  check "CLAUDE.md among them" has "$(printf '%s\n' "$out" | grep 'read them again now')" "/work/repo/CLAUDE.md"
+  check "settings take effect at the next start" \
+    has "$(printf '%s\n' "$out" | grep 'next start')" "/work/repo/.claude/settings.json"
+  # Not the folder count: with zstd-overlay on the host, the container's /src is one of its
+  # overlays too (see mounts()).
+  check "the header comes first and explains the image" has "$(printf '%s\n' "$out" | head -1)" \
+    "home folders are compressed (zstd) in an image"
+  check "naming the folder that holds the repository" has "$(printf '%s\n' "$out" | head -1)" ": /work and "
+  check "and the space outside it" has "$out" "Outside the image only"
+  check "and the --merge rule" has "$out" "Never run \`zstd-overlay up --merge\` unless the user agreed"
   check "the normal disk now has the session's CLAUDE.md" eq "$(x "$below")" "edited in the session"
   check "and its .claude/settings.json" eq "$(x 'mkdir -p /tmp/r && mount --bind / /tmp/r && cat /tmp/r/work/repo/.claude/settings.json; umount /tmp/r')" '{"x":1}'
   check "the image holds neither any more" eq "$(x 'ls /mnt/zstd-overlay/upper/%work/repo/CLAUDE.md /mnt/zstd-overlay/upper/%work/repo/.claude 2>/dev/null | wc -l')" 0
