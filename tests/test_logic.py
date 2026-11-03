@@ -6,6 +6,7 @@ scenarios in tests/run.sh cover that in Docker.
 
 from __future__ import annotations
 
+import contextlib
 import importlib.machinery
 import importlib.util
 import json
@@ -141,6 +142,11 @@ def test_shrink_goes_down_in_256_mib_steps():
 # --- change detection: the rule that nothing gets hidden -----------------------------------
 
 
+def _later() -> None:
+    """Let the clock move on, so the next write has a later ctime (the kernel's is coarse)."""
+    time.sleep(0.02)
+
+
 def _stamp_then_wait(tmp_path: Path) -> int:
     stamp = tmp_path / "stamp"
     stamp.touch()
@@ -243,13 +249,13 @@ def test_merge_tree_applies_deletes_and_keeps_newer_files(tmp_path):
     (upper / "refs").mkdir(parents=True)
     (lower / "refs").mkdir(parents=True)
     (lower / "index.lock").write_text("stale")
+    (lower / "refs" / "main").write_text("old commit")
+    _later()
     os.mknod(upper / "index.lock", 0o600 | stat.S_IFCHR, 0)  # the session deleted it
     (upper / "refs" / "main").write_text("session commit")  # the session moved the branch
-    (lower / "refs" / "main").write_text("old commit")
-    os.utime(lower / "refs" / "main", (1, 1))
-    (lower / "FETCH_HEAD").write_text("written after the session")
     (upper / "FETCH_HEAD").write_text("older")
-    os.utime(upper / "FETCH_HEAD", (1, 1))
+    _later()
+    (lower / "FETCH_HEAD").write_text("written after the session")
     zo.merge_tree(str(upper), str(lower))
     assert not (lower / "index.lock").exists()
     assert (lower / "refs" / "main").read_text() == "session commit"
@@ -264,13 +270,80 @@ def test_both_sides_of_git_config_are_kept(tmp_path):
     upper.mkdir(parents=True)
     lower.mkdir(parents=True)
     (upper / "config").write_text('[core]\n\tbare = false\n[branch "main"]\n\tremote = origin\n')
-    os.utime(upper / "config", (1, 1))
+    _later()
     (lower / "config").write_text("[core]\n\tbare = false\n\tsshCommand = platform\n")
     zo.merge_tree(str(upper), str(lower))
     text = (lower / "config").read_text()
     assert "sshCommand = platform" in text
     assert "remote = origin" in text
     assert text.count("bare = false") == 1
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+def test_git_config_keeps_only_the_platforms_value_of_a_key_it_rewrote(tmp_path):
+    # On resume the platform writes a fresh remote URL. The image's stale one must not become a
+    # second url: git would push to both. Keys only the session set keep all their values.
+    upper, lower = tmp_path / "upper" / ".git", tmp_path / "lower" / ".git"
+    upper.mkdir(parents=True)
+    lower.mkdir(parents=True)
+    (upper / "config").write_text(
+        '[remote "origin"]\n\turl = http://proxy:1111/old\n'
+        '[remote "fork"]\n\tfetch = +refs/a/*:refs/x/*\n\tfetch = +refs/b/*:refs/y/*\n'
+    )
+    _later()
+    (lower / "config").write_text('[remote "origin"]\n\turl = http://proxy:2222/new\n')
+    zo.merge_tree(str(upper), str(lower))
+    text = (lower / "config").read_text()
+    assert "2222/new" in text
+    assert "1111/old" not in text
+    assert "refs/a/*" in text
+    assert "refs/b/*" in text
+
+
+def test_merge_tree_judges_age_by_ctime_not_mtime(tmp_path):
+    # `cp -a` or `tar -xp` on the normal disk writes new content with an old mtime; it is still
+    # the newer write and must not be replaced by the image's copy.
+    upper, lower = tmp_path / "upper", tmp_path / "lower"
+    upper.mkdir()
+    lower.mkdir()
+    (upper / "f").write_text("image")
+    _later()
+    (lower / "f").write_text("restored later with cp -a")
+    os.utime(lower / "f", (1, 1))
+    zo.merge_tree(str(upper), str(lower))
+    assert (lower / "f").read_text() == "restored later with cp -a"
+
+
+def test_merge_tree_keeps_a_folder_holding_a_newer_file(tmp_path):
+    # The image has a file where the normal disk has a folder (or the other way round). The
+    # normal disk's side holds something written later: it stays, whatever its type.
+    upper, lower = tmp_path / "upper", tmp_path / "lower"
+    (upper / "b").mkdir(parents=True)
+    (lower / "a" / "deep").mkdir(parents=True)
+    (upper / "a").write_text("image file where a folder is")
+    (upper / "b" / "inner").write_text("image")
+    _later()
+    (lower / "a" / "deep" / "new").write_text("written later")
+    (lower / "b").write_text("normal disk file where the image has a folder")
+    zo.merge_tree(str(upper), str(lower))
+    assert (lower / "a" / "deep" / "new").read_text() == "written later"
+    assert (lower / "b").read_text() == "normal disk file where the image has a folder"
+
+
+def test_merge_tree_does_not_write_through_a_symlink(tmp_path):
+    # The normal disk has an older symlink where the image has a folder: the folder replaces the
+    # symlink; nothing is written where the symlink pointed.
+    upper, lower, outside = tmp_path / "upper", tmp_path / "lower", tmp_path / "outside"
+    lower.mkdir()
+    outside.mkdir()
+    (lower / "d").symlink_to(outside)
+    _later()
+    (upper / "d").mkdir(parents=True)
+    (upper / "d" / "f").write_text("image")
+    zo.merge_tree(str(upper), str(lower))
+    assert list(outside.iterdir()) == []
+    assert not (lower / "d").is_symlink()
+    assert (lower / "d" / "f").read_text() == "image"
 
 
 # --- mountinfo ---------------------------------------------------------------------------
@@ -547,3 +620,148 @@ def test_write_back_without_edits_does_nothing(tmp_path):
     (tmp_path / "upper").mkdir()
     (tmp_path / "lower").mkdir()
     assert zo.write_back(str(tmp_path / "upper"), str(tmp_path / "lower"), ["CLAUDE.md", ".claude"]) == []
+
+
+def test_absorb_judges_every_hard_link_by_the_same_age(tmp_path):
+    # Removing one name of a hard-linked leftover sets the inode's ctime to now; the next name
+    # must still count as a leftover, not as a fresh write that replaces the image's version.
+    lower, upper = tmp_path / "lower", tmp_path / "upper"
+    lower.mkdir()
+    upper.mkdir()
+    (lower / "a").write_text("stale")
+    os.link(lower / "a", lower / "b")
+    mounted = _stamp_then_wait(tmp_path)
+    (upper / "a").write_text("newer a")
+    (upper / "b").write_text("newer b")
+    zo.absorb(str(lower), str(upper), mounted)
+    assert ((upper / "a").read_text(), (upper / "b").read_text()) == ("newer a", "newer b")
+    assert list(lower.iterdir()) == []
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="mknod needs root")
+def test_absorb_keeps_a_deleted_folder_deleted(tmp_path):
+    # An earlier version left pip/ below the mount; the session ran `rm -rf ~/.cache/pip`. The
+    # old files must not come back; a file written there after the mount does.
+    lower, upper = tmp_path / "lower", tmp_path / "upper"
+    (lower / "pip" / "http").mkdir(parents=True)
+    (lower / "pip" / "http" / "old").write_text("left below")
+    upper.mkdir()
+    mounted = _stamp_then_wait(tmp_path)
+    os.mknod(upper / "pip", 0o600 | stat.S_IFCHR, 0)
+    zo.absorb(str(lower), str(upper), mounted)
+    assert zo.is_whiteout(os.lstat(upper / "pip"))
+    assert list(lower.iterdir()) == []
+    (lower / "pip" / "http").mkdir(parents=True)
+    (lower / "pip" / "http" / "new").write_text("written before the hook")
+    zo.absorb(str(lower), str(upper), mounted)
+    assert sorted(os.listdir(upper / "pip" / "http")) == ["new"]
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="trusted xattrs need root")
+def test_absorb_keeps_a_replaced_folder_replaced(tmp_path):
+    # `rm -rf d && mkdir d` in the session makes d opaque: the old files it hid stay hidden.
+    lower, upper = tmp_path / "lower", tmp_path / "upper"
+    (lower / "d").mkdir(parents=True)
+    (lower / "d" / "old").write_text("hidden by the new folder")
+    mounted = _stamp_then_wait(tmp_path)
+    (upper / "d").mkdir(parents=True)
+    os.setxattr(upper / "d", "trusted.overlay.opaque", b"y")
+    (upper / "d" / "new").write_text("the session's")
+    zo.absorb(str(lower), str(upper), mounted)
+    assert os.listdir(upper / "d") == ["new"]
+
+
+def test_absorb_does_not_write_through_a_symlink(tmp_path):
+    # The session replaced a cache folder with a symlink; npm wrote the folder again before the
+    # hook. The new files go into the image, not where the symlink points.
+    lower, upper, outside = tmp_path / "lower", tmp_path / "upper", tmp_path / "outside"
+    upper.mkdir()
+    outside.mkdir()
+    (upper / "d").symlink_to(outside)
+    mounted = _stamp_then_wait(tmp_path)
+    (lower / "d").mkdir(parents=True)
+    (lower / "d" / "new").write_text("written before the hook")
+    zo.absorb(str(lower), str(upper), mounted)
+    assert list(outside.iterdir()) == []
+    assert (upper / "d" / "new").read_text() == "written before the hook"
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="trusted xattrs need root")
+def test_write_back_of_a_replaced_folder_drops_the_old_files(tmp_path):
+    # `rm -rf .claude && mkdir .claude` in the session: the old settings must not come back.
+    upper, lower = tmp_path / "upper", tmp_path / "lower"
+    (lower / ".claude").mkdir(parents=True)
+    (lower / ".claude" / "old-hook.json").write_text("deleted in the session")
+    (upper / ".claude").mkdir(parents=True)
+    os.setxattr(upper / ".claude", "trusted.overlay.opaque", b"y")
+    (upper / ".claude" / "settings.json").write_text("{}")
+    zo.write_back(str(upper), str(lower), [".claude"])
+    assert os.listdir(lower / ".claude") == ["settings.json"]
+    assert not (upper / ".claude").exists()
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="trusted xattrs need root")
+def test_write_back_leaves_worktrees_in_the_image(tmp_path):
+    # .claude/worktrees holds whole checkouts; moving them out of the image at every mount would
+    # fill the normal disk. The rest of .claude is written back, and what stays hides nothing.
+    upper, lower = tmp_path / "upper", tmp_path / "lower"
+    (upper / ".claude" / "worktrees" / "wt" / "node_modules").mkdir(parents=True)
+    (upper / ".claude" / "worktrees" / "wt" / "node_modules" / "big").write_text("x" * 1000)
+    os.setxattr(upper / ".claude", "trusted.overlay.opaque", b"y")
+    (upper / ".claude" / "settings.json").write_text("{}")
+    lower.mkdir()
+    assert zo.write_back(str(upper), str(lower), [".claude"]) == [".claude/settings.json"]
+    assert (lower / ".claude" / "settings.json").exists()
+    assert not (lower / ".claude" / "worktrees").exists()
+    assert (upper / ".claude" / "worktrees" / "wt" / "node_modules" / "big").exists()
+    assert os.listdir(upper / ".claude") == ["worktrees"]
+    assert not zo.is_opaque(str(upper / ".claude"))
+
+
+def test_a_path_with_percent_is_refused():
+    # A layer is named by its path with "/" written as "%": /w/a%b and /w/a/b would share one.
+    assert "%" in (zo.guard("/w/50%off", zo.Config.from_env({"HOME": "/root"}), []) or "")
+
+
+def test_one_folder_failing_does_not_stop_the_others(monkeypatch):
+    s = zo.Session(zo.Config.from_env({"HOME": "/root"}), quiet=True)
+    tried = []
+
+    def mount_dir(self, d, merge=False, cache=False):
+        tried.append(d)
+        if d == "/a":
+            raise OSError(28, "No space left on device")
+        return True
+
+    monkeypatch.setattr(zo.Session, "mount_image", lambda self: None)
+    monkeypatch.setattr(zo.Session, "mount_dir", mount_dir)
+    s.up(["/a", "/b"])
+    assert tried == ["/a", "/b"]
+    assert s.refused == 1
+    assert "NOT MOUNTED: /a" in s.lines[0]
+
+
+def test_the_hook_reports_an_error_with_exit_0(monkeypatch, capsys):
+    # Claude Code reads a SessionStart hook's output only on exit 0: an error must come back as
+    # the JSON report, not as exit 2 nobody sees.
+    monkeypatch.setenv("CLAUDE_CODE_REMOTE", "true")
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    monkeypatch.setattr(zo, "locked", contextlib.nullcontext)
+
+    def boom(self, dirs, merge=False):
+        raise zo.Stop("losetup: no free loop device")
+
+    monkeypatch.setattr(zo.Session, "up", boom)
+    assert zo.main(["up", "--hook"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert "losetup" in out["hookSpecificOutput"]["additionalContext"]
+
+
+def test_flags_may_follow_the_folders(monkeypatch):
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    monkeypatch.setattr(zo, "locked", contextlib.nullcontext)
+    seen = []
+    monkeypatch.setattr(zo.Session, "up", lambda self, dirs, merge=False: seen.append((dirs, merge)))
+    assert zo.main(["up", "/work", "--merge"]) == 0
+    assert seen == [(["/work"], True)]
+    assert zo.main(["up", "--mrege", "/work"]) == 2

@@ -2,6 +2,7 @@
 
 ## Now
 
+- 2026-11-03: code review of PR #111 (10 findings + 5 smaller ones). Fixed in code with a failing-first unit test each: absorb (hard-link ctime, deleted or replaced folders, symlinks), merge_tree (ctime, newer files in a folder of the other type, symlinks), .git/config keeps the platform's keys, write-back of a replaced `.claude` and `.claude/worktrees` kept in the image, `%` in a path refused, one failing folder no longer stops `up`, `--hook` reports errors with exit 0, flags after folders, stale-process check (pipeline only, device before the mount). Scenarios 5, 9 and 11 fixed. Not changed: the default home folders are empty until the hook; documented under Limits, owner to decide whether `~/.local/bin` and toolchains stay in the default list.
 - 2026-11-03: 94085a131cbe runs in both sessions of the environment: the old one was fixed by hand (layer folded, 12,769 npm files merged, nothing refused), this one resumed at 06:37 with nothing refused or moved again. Open: the old session's next resume; the final setup script pasted into both environments; the PR.
 - 2026-11-02: Python version: `zstd-overlay` (up, migrate, install, status, doctor), 44 unit tests (`mise run check`, `mise run matrix`) and `tests/run.sh` (13 Docker scenarios). 2026-11-03: works through a real environment's setup script (hook ran at start; 200 MB of text cost 7 MB). Hook on `resume` observed working (9fdf465928aa, this session, 05:45).
 - Next: graduate to a public repo so setup scripts can `curl` it (this repo is private).
