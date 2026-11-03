@@ -380,19 +380,18 @@ def hook_header(
 INSTRUCTIONS = ("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md")
 
 
-def startup_kind(path: str) -> str | None:
-    """ "read": instructions loaded into this start's context; reading them again applies them.
-    "restart": what the harness loads once (settings, hooks, agents, commands, MCP servers).
-    None: a skill's other files, read fresh when the skill runs."""
+def startup_kind(path: str) -> str:
+    """ "read": instructions loaded into this start's context (CLAUDE.md, CLAUDE.local.md,
+    AGENTS.md, .claude/CLAUDE.md, .claude/rules/**/*.md); reading them again applies them.
+    "restart": the rest, which the harness loads once at a start (settings, hooks, agents,
+    commands, the skill list, MCP servers). A skill's files and nested CLAUDE.md files load
+    when used, from the mount, so they are current then."""
     parts = path.split(os.sep)
     if ".claude" in parts:
         sub = parts[parts.index(".claude") + 1 :]
-        if sub[:1] == ["rules"] or (sub[:1] == ["skills"] and sub[-1] == "SKILL.md"):
-            return "read"
-        return None if sub[:1] == ["skills"] else "restart"
-    if parts[-1] in INSTRUCTIONS:
-        return "read"
-    return "restart" if parts[-1] == ".mcp.json" else None
+        rule = sub[:1] == ["rules"] and sub[-1].endswith(".md")
+        return "read" if sub == ["CLAUDE.md"] or rule else "restart"
+    return "read" if parts[-1] in INSTRUCTIONS else "restart"
 
 
 def reread_note(written: list[str], deleted: list[str]) -> list[str]:

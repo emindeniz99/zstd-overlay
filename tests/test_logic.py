@@ -903,7 +903,7 @@ def test_a_refusal_carries_the_header_in_its_json(monkeypatch, capsys):
 
 @pytest.mark.skipif(os.geteuid() != 0, reason="mknod needs root")
 def test_the_note_names_what_to_read_now_and_what_waits_for_the_next_start(tmp_path):
-    # Field report: most instructions live in .claude/rules and skills; an edited rule was
+    # Field report: most instructions live in .claude/rules; an edited rule was
     # written back, but the note named only CLAUDE.md and put the rule under "next start".
     cfg = zo.Config(img=str(tmp_path / "disk.img"), mnt=str(tmp_path / "mnt"), reserve=0, home="/root",
                     project=str(tmp_path / "lower" / "repo"))  # fmt: skip
@@ -916,6 +916,11 @@ def test_the_note_names_what_to_read_now_and_what_waits_for_the_next_start(tmp_p
     (upper / ".claude" / "skills" / "s").mkdir(parents=True)
     (upper / ".claude" / "rules" / "x.md").write_text("edited rule")
     os.mknod(upper / ".claude" / "rules" / "old.md", 0o600 | stat.S_IFCHR, 0)
+    (upper / ".claude" / "rules" / "nested").mkdir()
+    (upper / ".claude" / "rules" / "nested" / "y.md").write_text("a rule one folder down")
+    (upper / ".claude" / "CLAUDE.md").write_text("instructions under .claude")
+    # Only the skill list (each SKILL.md's frontmatter) is loaded at start; the rest of a skill
+    # is read from the mount when it is used.
     (upper / ".claude" / "skills" / "s" / "SKILL.md").write_text("skill")
     (upper / ".claude" / "skills" / "s" / "helper.py").write_text("read when the skill runs")
     (upper / ".mcp.json").write_text("{}")
@@ -925,10 +930,21 @@ def test_the_note_names_what_to_read_now_and_what_waits_for_the_next_start(tmp_p
     gone = next(line for line in s.lines if "disregard them" in line)
     later = next(line for line in s.lines if "next start" in line)
     assert f"{repo}/.claude/rules/x.md" in now
-    assert f"{repo}/.claude/skills/s/SKILL.md" in now
+    assert f"{repo}/.claude/rules/nested/y.md" in now
+    assert f"{repo}/.claude/CLAUDE.md" in now
+    assert "skills" not in now
     assert ".mcp.json" not in now
     assert f"{repo}/.claude/rules/old.md" in gone
     assert f"{repo}/.mcp.json" in later
+    assert f"{repo}/.claude/skills/s/SKILL.md" in later
     assert "rules" not in later
-    assert not any("helper.py" in line for line in (now, gone, later))
     assert any(line.startswith("zstd-overlay: deleted 1 startup files") and "old.md" in line for line in s.lines)
+
+
+def test_startup_kind_follows_what_claude_code_loads_at_start():
+    for path in ("r/CLAUDE.md", "r/CLAUDE.local.md", "r/AGENTS.md", "r/.claude/CLAUDE.md", "r/.claude/rules/a/b.md"):
+        assert zo.startup_kind(path) == "read", path
+    for path in ("r/.mcp.json", "r/.claude/settings.json", "r/.claude/settings.local.json", "r/.claude/hooks/h.sh",
+                 "r/.claude/agents/a.md", "r/.claude/commands/c.md", "r/.claude/skills/s/SKILL.md",
+                 "r/.claude/rules/notes.txt"):  # fmt: skip
+        assert zo.startup_kind(path) == "restart", path
