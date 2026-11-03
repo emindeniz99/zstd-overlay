@@ -117,3 +117,5 @@ The full run of `49d0831` (scenarios 1 to 16): 16 of 16 scenarios, 111 of 111 ch
 This session, with `9fdf465928aa` installed, resumed (boot 05:45:32). The SessionStart hook reported: `moved /home/user/playground/.git out of the image`, `compressed: /home/user`, and `migrated` for `~/.cache` (0.7 GiB), `~/.local/share` (0.5), `~/.local/bin` (0.2), `~/.npm` (0.2), `~/.cargo` (0.1), `~/.gradle`, `~/.dotnet` and `~/.bun`, with no folder refused. Afterwards `git status` was clean at `ace774b`, `git fsck` passed, `.git` was a bind mount, and `doctor` showed every folder `ok` with 1.8 GiB stored.
 
 The environment's other session was still on `dd94e60`: a running session never gets a changed setup script. That version had mounted the repository on its own, so the new default (`/home/user`) would leave its earlier layer unseen; `up` now folds such layers into the normal disk first (scenario 17).
+
+The full run of `9eb3465` (scenarios 1 to 18): 18 of 18 scenarios, 128 of 128 checks passed; 59 unit tests on Python 3.11 to 3.15.
