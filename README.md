@@ -56,7 +56,9 @@ ZSTD_OVERLAY_EOF
 python3 /tmp/zstd-overlay install
 ```
 
-`install` creates no image. The image appears at the first session start, after the environment cache snapshot, so the snapshot holds a few kilobytes instead of a disk image. Not verified on the cloud platform yet: that the snapshot keeps `~/.claude/settings.json`, and that a restored VM fires the hook with `resume`. Run `zstd-overlay doctor` in the first session to check.
+`install` creates no image. The image appears at the first session start, after the environment cache snapshot, so the snapshot holds a few kilobytes instead of a disk image.
+
+Checked on 2026-11-03 in a new environment with this setup script: the snapshot kept the hook, the hook ran at session start and mounted the repository and 8 cache folders, and a 200 MB file of repeated text grew the image by 7 MB. Not observed yet: the hook on `resume` after an idle restore. The platform docs say a cloud session runs hooks from server-managed settings and the repository, and that user-level hooks stay on your machine; the hook in the VM's own `~/.claude/settings.json` ran anyway. If a future session shows nothing mounted, check that first. Run `zstd-overlay doctor` in a session to see the state.
 
 In a session that started before the hook existed, run `zstd-overlay up` once.
 

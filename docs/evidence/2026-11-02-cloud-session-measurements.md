@@ -84,3 +84,16 @@ Nothing but Nix builds a btrfs loop volume with `compress=zstd:1` for `/nix` on 
 The full run of the version in commit `0253ed0` (bash): 13 of 13 scenarios, 78 of 78 checks passed.
 
 The Python rewrite (`2335422`): the full run passed 76 of 77 checks. The one failure was the test: on the image without python3, "nothing was mounted" counted the container's own overlay root. With the check counting only zstd-overlay's mounts and btrfs, scenario 10 passed 7 of 7. The unit tests (44) pass on Python 3.11 to 3.15.
+
+## In a real environment, 2026-11-03
+
+A new cloud environment got the setup script built from commit `dd94e60` (the version that mounted the repository itself, before the folder holding it). Its first session reported:
+
+- the hook ran at session start: a 26 GB image (`compress-force=zstd:3`) at `/mnt/zstd-overlay`, overlays on the repository, `~/.cache`, `~/.local/share`, `~/.local/bin`, `~/.npm`, `~/.rustup`, `~/.cargo`, `~/.gradle` and `~/.bun`;
+- a 200 MB file of repeated text written into the repository grew the image from 75 to 82 MB;
+- 25.9 GB reserved for the image, 4.0 GB free outside it;
+- `doctor` skipped the repository because `CLAUDE_PROJECT_DIR` is set for hooks and not in a shell, and the hook named its own shell as a process started before the mount. Both are fixed: `doctor` lists every mounted folder from the kernel, and `up` skips its own ancestors.
+
+So the environment cache snapshot kept `~/.claude/settings.json` and Claude Code ran its hook, although the platform docs list only server-managed and repository hooks for cloud sessions. Not observed yet: the hook on `resume`.
+
+Docker runs for the later commits: the folder-holding-the-repository default (`f489928`) passed 13 of 13 scenarios; the `doctor` and own-shell fixes passed scenarios 1, 4 and 11 again, with checks added for both.

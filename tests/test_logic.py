@@ -299,3 +299,10 @@ def test_config_defaults():
     c = zo.Config.from_env({"HOME": "/root"})
     assert (c.img, c.mnt, c.reserve, c.project) == ("/var/lib/zstd-overlay/disk.img", "/mnt/zstd-overlay",
                                                      4096 * MiB, "")  # fmt: skip
+
+
+def test_own_shell_is_not_a_stale_process():
+    # The hook runs inside a shell whose working directory is the repository; that shell started
+    # before the mount but is ours, so `up` must not tell the user to restart it.
+    mine = zo.ancestors(os.getpid())
+    assert {os.getpid(), os.getppid()} <= mine

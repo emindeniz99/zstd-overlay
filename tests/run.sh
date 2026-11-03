@@ -91,8 +91,9 @@ done_scenario() {
 s1() {
   scenario 1 "fresh session: default list, compression, capacity follows the disk"
   start s1
-  local out; out=$(x "$ZO up; echo exit=\$?")
+  local out; out=$(x "cd /work/repo && $ZO up; echo exit=\$?")
   check "up exits 0" has "$out" "exit=0"
+  check "up does not report its own shell as a process to restart" eq "$(printf '%s\n' "$out" | grep -c 'started earlier')" 0
   check "the folder holding the repo, ~/.cache, ~/.local/share, ~/.local/bin, ~/.npm mounted" eq "$(mounts)" 5
   check "it is /work, the folder holding /work/repo" eq "$(x 'findmnt -rn -t overlay -o TARGET | grep -cx /work')" 1
   xs 'git clone -q /work/repo /work/attached-later && head -c 20M /dev/zero > /work/attached-later/big && sync'
@@ -104,6 +105,7 @@ s1() {
   read -r cap avail img < <(x 'echo $(df -B1M --output=size /mnt/zstd-overlay | tail -1) $(df -B1M --output=avail /var/lib/zstd-overlay | tail -1) $(du -m /var/lib/zstd-overlay/disk.img | cut -f1)')
   check "the image reserves its whole capacity on disk ($img of $cap MiB)" lt $((cap - img)) 64
   check "4 GiB stay free outside the image ($avail MiB)" lt $(( (avail - 4096) * (avail - 4096) )) $((300 * 300))
+  check "doctor without CLAUDE_PROJECT_DIR still lists the mounted repo folder" has "$(x "env -u CLAUDE_PROJECT_DIR $ZO doctor")" "ok        /work"
   check "no btrfs-progs in the container" eq "$(x 'command -v mkfs.btrfs btrfs | wc -l')" 0
   done_scenario
 }

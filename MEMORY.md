@@ -2,7 +2,7 @@
 
 ## Now
 
-- 2026-11-02: Python version: `zstd-overlay` (up, migrate, install, status, doctor), 44 unit tests (`mise run check`, `mise run matrix`) and `tests/run.sh` (13 Docker scenarios). Not yet used through a real cloud environment's setup script; the first session that does should run `zstd-overlay doctor` and record whether the hook fired on `resume` and the snapshot kept `~/.claude/settings.json`.
+- 2026-11-02: Python version: `zstd-overlay` (up, migrate, install, status, doctor), 44 unit tests (`mise run check`, `mise run matrix`) and `tests/run.sh` (13 Docker scenarios). 2026-11-03: works through a real environment's setup script (hook ran at start; 200 MB of text cost 7 MB). Still to observe: the hook on `resume`.
 - Next: graduate to a public repo so setup scripts can `curl` it (this repo is private).
 
 ## Decisions
@@ -16,6 +16,8 @@
 - 2026-11-02: rewritten from bash to Python 3.11+ stdlib, one file (owner: "a well-tested tool deserves a real language"): unit tests for the logic, no perl/jq fallbacks; a cloud session has Python 3.13. The bash version (0253ed0) passed all 13 scenarios first; the scenarios are language-independent and gate the rewrite.
 
 ## Learnings
+
+- 2026-11-03: the platform docs say cloud sessions run only server-managed and repository hooks; a hook in the VM's own `~/.claude/settings.json`, written by the setup script, ran anyway. Revisit if a session starts with nothing mounted.
 
 - 2026-11-02: a cloud session's VM restarted three times in one idle day; files stay, mounts go. The SessionStart hook is what makes this work.
 - 2026-11-02: shrink btrfs in 256 MiB steps; one big step fails with ENOSPC when empty block groups sit above the new end.

@@ -525,8 +525,9 @@ class Session:
         on 2026-11-02)."""
         lower_dev = os.stat(os.path.dirname(path)).st_dev
         names = []
+        mine = ancestors(os.getpid())  # this process and the shell or hook runner that started it
         for pid in filter(str.isdigit, os.listdir("/proc")):
-            if pid == str(os.getpid()):
+            if int(pid) in mine:
                 continue
             try:
                 if os.readlink(f"/proc/{pid}/exe").endswith("/claude"):
@@ -627,7 +628,7 @@ class Session:
         self.say(f"installed {INSTALL_PATH} and a SessionStart hook in {settings}")
         self.say("the image is created at the first session start, not now")
 
-    def status(self) -> None:
+    def status(self, list_folders: bool = True) -> None:
         cfg = self.cfg
         if not mount_at(cfg.mnt):
             self.say("image not mounted (run: zstd-overlay up)")
@@ -640,23 +641,44 @@ class Session:
             f"stored {gib(stored)}; image capacity {gib(fs_size(cfg.mnt))} "
             f"(reserved on disk: {gib(allocated(cfg.img))}); free outside the image {gib(free)}"
         )
-        for o in our_overlays(mounts_now(), cfg.mnt):
-            print(f"  {o}")
+        if list_folders:
+            for o in our_overlays(mounts_now(), cfg.mnt):
+                print(f"  {o}")
 
     def doctor(self) -> None:
-        self.status()
+        """Every mounted folder, then every default folder that is not mounted and why. Mounted
+        folders come from the kernel, so the list is right even where $CLAUDE_PROJECT_DIR is not
+        set (a shell, as opposed to the hook)."""
+        self.status(list_folders=False)
         image = mount_at(self.cfg.mnt) is not None
         mounted = our_overlays(mounts_now(), self.cfg.mnt)
+        for d in mounted:
+            print(f"  ok        {d}")
+        if not self.cfg.project:
+            print("  (CLAUDE_PROJECT_DIR is not set here, so the repository's folder is checked only if mounted)")
         for d in default_dirs(self.cfg):
             d = os.path.realpath(d)
             if d in mounted:
-                print(f"  ok        {d}")
+                continue
             elif why := guard(d, self.cfg, mounted):
                 print(f"  refused   {d} ({why})")
             elif image and (n := len(self.changed(d))):
                 print(f"  CHANGED   {d} ({n} paths changed while unmounted; see: zstd-overlay up {d})")
             else:
                 print(f"  unmounted {d}")
+
+
+def ancestors(pid: int) -> set[int]:
+    """pid and every parent up to init, from /proc/<pid>/status."""
+    found = set()
+    while pid > 0 and pid not in found:
+        found.add(pid)
+        try:
+            status = Path(f"/proc/{pid}/status").read_text()
+        except OSError:
+            break
+        pid = next((int(line.split()[1]) for line in status.splitlines() if line.startswith("PPid:")), 0)
+    return found
 
 
 def copy_entry(src: str, dst: str) -> None:
