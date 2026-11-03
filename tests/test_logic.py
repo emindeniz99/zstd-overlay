@@ -595,8 +595,9 @@ def test_write_back_moves_startup_files_to_the_normal_disk(tmp_path):
     (upper / "repo" / ".claude" / "rules" / "new.md").write_text("a new rule")
     (upper / "repo" / "src.py").write_text("code stays in the image")
     rels = [f"repo/{f}" for f in zo.STARTUP_FILES]
-    done = zo.write_back(str(upper), str(lower), rels)
-    assert sorted(done) == ["repo/.claude/rules/new.md", "repo/CLAUDE.md"]
+    written, deleted = zo.write_back(str(upper), str(lower), rels)
+    assert sorted(written) == ["repo/.claude/rules/new.md", "repo/CLAUDE.md"]
+    assert deleted == []
     assert (lower / "repo" / "CLAUDE.md").read_text() == "edited in the session"
     assert (lower / "repo" / ".claude" / "rules" / "new.md").read_text() == "a new rule"
     assert not (upper / "repo" / "CLAUDE.md").exists()
@@ -611,7 +612,7 @@ def test_write_back_applies_a_deleted_startup_file(tmp_path):
     lower.mkdir()
     (lower / ".mcp.json").write_text("{}")
     os.mknod(upper / ".mcp.json", 0o600 | stat.S_IFCHR, 0)  # the session deleted it
-    assert zo.write_back(str(upper), str(lower), [".mcp.json"]) == [".mcp.json"]
+    assert zo.write_back(str(upper), str(lower), [".mcp.json"]) == ([], [".mcp.json"])
     assert not (lower / ".mcp.json").exists()
     assert not os.path.lexists(upper / ".mcp.json")
 
@@ -619,7 +620,7 @@ def test_write_back_applies_a_deleted_startup_file(tmp_path):
 def test_write_back_without_edits_does_nothing(tmp_path):
     (tmp_path / "upper").mkdir()
     (tmp_path / "lower").mkdir()
-    assert zo.write_back(str(tmp_path / "upper"), str(tmp_path / "lower"), ["CLAUDE.md", ".claude"]) == []
+    assert zo.write_back(str(tmp_path / "upper"), str(tmp_path / "lower"), ["CLAUDE.md", ".claude"]) == ([], [])
 
 
 def test_absorb_judges_every_hard_link_by_the_same_age(tmp_path):
@@ -710,7 +711,7 @@ def test_write_back_leaves_worktrees_in_the_image(tmp_path):
     os.setxattr(upper / ".claude", "trusted.overlay.opaque", b"y")
     (upper / ".claude" / "settings.json").write_text("{}")
     lower.mkdir()
-    assert zo.write_back(str(upper), str(lower), [".claude"]) == [".claude/settings.json"]
+    assert zo.write_back(str(upper), str(lower), [".claude"]) == ([".claude/settings.json"], [])
     assert (lower / ".claude" / "settings.json").exists()
     assert not (lower / ".claude" / "worktrees").exists()
     assert (upper / ".claude" / "worktrees" / "wt" / "node_modules" / "big").exists()
@@ -810,3 +811,32 @@ def test_an_image_that_does_not_mount_is_retried_from_a_backup_root(tmp_path, mo
     assert "usebackuproot" in calls[1][2]
     assert any("backup root" in line for line in s.lines)
     assert s.refused == 0
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="mknod needs root")
+def test_a_deleted_startup_file_is_reported_as_deleted_not_written(tmp_path):
+    # Field report, 2026-11-03: the session deleted a probe under .claude/, and the hook said
+    # "wrote 1 startup files back to the normal disk" for it. The file was gone everywhere,
+    # which was right; the line was not.
+    cfg = zo.Config(img=str(tmp_path / "disk.img"), mnt=str(tmp_path / "mnt"), reserve=0, home="/root",
+                    project=str(tmp_path / "lower" / "repo"))  # fmt: skip
+    lower, repo = tmp_path / "lower", tmp_path / "lower" / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".claude").mkdir()
+    (repo / ".claude" / "probe.txt").write_text("written while mounted, then deleted")
+    (repo / "CLAUDE.md").write_text("as cloned")
+    upper = Path(zo.Session(cfg).upper(str(lower)))
+    (upper / "repo" / ".claude").mkdir(parents=True)
+    os.mknod(upper / "repo" / ".claude" / "probe.txt", 0o600 | stat.S_IFCHR, 0)
+    (upper / "repo" / "CLAUDE.md").write_text("edited in the session")
+    s = zo.Session(cfg, quiet=True)
+    s.write_back_startup_files(str(lower))
+    assert not (repo / ".claude" / "probe.txt").exists()
+    assert (repo / "CLAUDE.md").read_text() == "edited in the session"
+    wrote = [line for line in s.lines if "wrote 1 startup" in line]
+    deleted = [line for line in s.lines if "deleted 1 startup" in line]
+    assert len(wrote) == 1
+    assert "CLAUDE.md" in wrote[0]
+    assert "probe" not in wrote[0]
+    assert len(deleted) == 1
+    assert "probe.txt" in deleted[0]

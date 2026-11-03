@@ -595,14 +595,20 @@ class Session:
         roots = {os.path.dirname(g) for g in git_dirs(path)}
         if self.cfg.project and inside(os.path.realpath(self.cfg.project), path):
             roots.add(os.path.realpath(self.cfg.project))
-        written = []
+        written: list[str] = []
+        deleted: list[str] = []
         for root in sorted(roots):
             rel_root = os.path.relpath(root, path)
             rels = [os.path.normpath(os.path.join(rel_root, f)) for f in STARTUP_FILES]
-            written += [os.path.join(path, r) for r in write_back(upper, path, rels)]
-        if written:
-            shown = ", ".join(written[:6]) + (", ..." if len(written) > 6 else "")
-            self.say(f"wrote {len(written)} startup files back to the normal disk: {shown}")
+            w, d = write_back(upper, path, rels)
+            written += [os.path.join(path, r) for r in w]
+            deleted += [os.path.join(path, r) for r in d]
+        for verb, paths in (("wrote", written), ("deleted", deleted)):
+            if paths:
+                shown = ", ".join(paths[:6]) + (", ..." if len(paths) > 6 else "")
+                where = "back to" if verb == "wrote" else "on"
+                self.say(f"{verb} {len(paths)} startup files {where} the normal disk: {shown}")
+        if written or deleted:
             self.say(
                 "  note for Claude: Claude Code loaded the older copies of these at this start. "
                 "Read CLAUDE.md again now; changes to .claude/ settings, hooks, skills and .mcp.json "
@@ -1026,12 +1032,15 @@ def remove(path: str) -> None:
         os.unlink(path)
 
 
-def write_back(upper: str, lower: str, rels: list[str]) -> list[str]:
+def write_back(upper: str, lower: str, rels: list[str]) -> tuple[list[str], list[str]]:
     """Move the image's versions of `rels` (files or folders, relative to the folder) down to
     the normal disk and out of the image: a file replaces the normal disk's, a deletion marker
     deletes it, a replaced folder (opaque) replaces it whole. A folder's KEPT_IN_IMAGE entries
-    stay in the image. Called while the folder is not mounted. Returns the paths written back."""
-    done = []
+    stay in the image. Called while the folder is not mounted. Returns the paths written and
+    the paths deleted, so the two are reported apart (a field report read "wrote 1 startup
+    file back" for a delete)."""
+    written: list[str] = []
+    deleted: list[str] = []
     for rel in rels:
         top = os.path.join(upper, rel)
         if not os.path.lexists(top):
@@ -1039,11 +1048,13 @@ def write_back(upper: str, lower: str, rels: list[str]) -> list[str]:
         if not real_dir(top):
             dst = os.path.join(lower, rel)
             remove(dst)
-            if not is_whiteout(os.lstat(top)):
+            if is_whiteout(os.lstat(top)):
+                deleted.append(rel)
+            else:
                 os.makedirs(os.path.dirname(dst), exist_ok=True)
                 copy_entry(top, dst)
+                written.append(rel)
             os.unlink(top)
-            done.append(rel)
             continue
         kept = [n for n in os.listdir(top) if n in KEPT_IN_IMAGE]
         opaque = is_opaque(top)
@@ -1058,9 +1069,11 @@ def write_back(upper: str, lower: str, rels: list[str]) -> list[str]:
             for name in [d for d in dirs if os.path.islink(os.path.join(root, d))] + files:
                 src, dst = os.path.join(root, name), os.path.join(dst_root, name)
                 remove(dst)
-                if not is_whiteout(os.lstat(src)):
+                if is_whiteout(os.lstat(src)):
+                    deleted.append(os.path.relpath(dst, lower))
+                else:
                     copy_entry(src, dst)
-                done.append(os.path.relpath(dst, lower))
+                    written.append(os.path.relpath(dst, lower))
             dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(root, d))]
         for name in os.listdir(top):
             if name not in kept:
@@ -1069,7 +1082,7 @@ def write_back(upper: str, lower: str, rels: list[str]) -> list[str]:
             os.rmdir(top)
         elif opaque:  # what stays must not hide the folder just written back
             os.removexattr(top, "trusted.overlay.opaque", follow_symlinks=False)
-    return done
+    return written, deleted
 
 
 def newer_below(lower: str, upper: str) -> bool:
