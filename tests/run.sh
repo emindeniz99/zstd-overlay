@@ -93,7 +93,10 @@ s1() {
   start s1
   local out; out=$(x "$ZO up; echo exit=\$?")
   check "up exits 0" has "$out" "exit=0"
-  check "repo, ~/.cache, ~/.local/share, ~/.local/bin, ~/.npm mounted" eq "$(mounts)" 5
+  check "the folder holding the repo, ~/.cache, ~/.local/share, ~/.local/bin, ~/.npm mounted" eq "$(mounts)" 5
+  check "it is /work, the folder holding /work/repo" eq "$(x 'findmnt -rn -t overlay -o TARGET | grep -cx /work')" 1
+  xs 'git clone -q /work/repo /work/attached-later && head -c 20M /dev/zero > /work/attached-later/big && sync'
+  check "a repository cloned next to it later lands in the image" eq "$(x 'ls /mnt/zstd-overlay/upper/%work/attached-later/big | wc -l')" 1
   xs 'yes "the same line of build output, again and again" | head -c 300M > /work/repo/build.log; head -c 50M /dev/urandom > /root/.cache/random.bin; sync'
   local used; used=$(used_mb)
   check "300 MiB of text + 50 MiB of random: btrfs holds < 80 MiB (holds ${used})" lt "$used" 80
@@ -144,7 +147,7 @@ s4() {
   check "the other 4 folders mounted" eq "$(mounts)" 4
   check "the edit is visible (repo stays on the normal disk)" has "$(x 'cat /work/repo/README')" "edited while unmounted"
   check "session.txt not visible yet (it is in the image)" eq "$(x 'ls /work/repo/session.txt 2>/dev/null | wc -l')" 0
-  out=$(x "$ZO up --merge /work/repo; echo exit=\$?")
+  out=$(x "$ZO up --merge /work; echo exit=\$?")
   check "--merge exits 0" has "$out" "exit=0"
   check "after merge: the edit is kept" has "$(x 'cat /work/repo/README')" "edited while unmounted"
   check "after merge: session.txt is back" has "$(x 'cat /work/repo/session.txt')" "from the session"
@@ -154,9 +157,9 @@ s4() {
   restart
   xs 'rm /work/repo/LOWERONLY'
   out=$(x "$ZO up; echo exit=\$?")
-  check "a deletion while unmounted is caught too" has "$out" "NOT MOUNTED: /work/repo"
+  check "a deletion while unmounted is caught too" has "$out" "NOT MOUNTED: /work changed"
   out=$(x "$ZO doctor")
-  check "doctor names the changed folder" has "$out" "CHANGED   /work/repo"
+  check "doctor names the changed folder" has "$out" "CHANGED   /work ("
   out=$(x "$ZO up --hook; echo exit=\$?")
   check "hook mode: exits 0 so Claude Code reads the output" has "$out" "exit=0"
   out=$(x "$ZO up --hook | jq -r '.systemMessage, .hookSpecificOutput.hookEventName, .hookSpecificOutput.additionalContext'")
@@ -188,6 +191,8 @@ s5() {
   check "deleted file stays deleted" eq "$(x 'ls /root/.m2/gone 2>/dev/null | wc -l')" 0
   out=$(x "$ZO migrate /work/repo; echo exit=\$?")
   check "a repository is refused" has "$out" "is a repository"
+  out=$(x "$ZO migrate /work; echo exit=\$?")
+  check "the folder holding the repository is refused too" has "$out" "refused: /work is a repository"
   # kill -9 in the middle of the copy, then check nothing was lost
   x 'mkdir -p /root/.gradle && for i in $(seq 1 40); do yes "g$i" | head -c 20M > /root/.gradle/f$i; done' >/dev/null
   before=$(x 'cd /root/.gradle && find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-16')
@@ -266,15 +271,16 @@ s9() {
     echo "    SKIP  mise could not be downloaded (network)"; SCN_SKIP=1; done_scenario; return
   fi
   xs "$ZO up"
-  docker cp "$PROJ/../adagia" "$CT:/work/adagia" 2>>"$LOG"; docker cp "$PROJ/../devlock" "$CT:/work/devlock" 2>>"$LOG"
-  xs "$ZO up /work/adagia /work/devlock"
+  # docker cp writes from the host side, under the container's mounts; copy inside instead.
+  docker cp "$PROJ/../adagia" "$CT:/stage-adagia" 2>>"$LOG"; docker cp "$PROJ/../devlock" "$CT:/stage-devlock" 2>>"$LOG"
+  xs 'cp -a /stage-adagia /work/adagia && cp -a /stage-devlock /work/devlock'
   local out
   out=$(x 'export PATH=/root/.local/bin:$PATH; cd /work/adagia && mise trust -q . && mise install -q && mise exec -- node --version && mise exec -- pnpm --version && mise exec -- pnpm install --frozen-lockfile >/dev/null && echo pnpm-ok')
   check "node 24 + pnpm 12 + pnpm install" has "$out" "pnpm-ok"
   out=$(x 'export PATH=/root/.local/bin:$PATH; cd /work/devlock && mise trust -q . && mise install -q && mise exec -- uv sync --locked >/dev/null 2>&1 && mise exec -- uv run python -c "print(\"py-ok\")"')
   check "uv + Python + uv sync" has "$out" "py-ok"
   check "mise installs live in the image" has "$(x 'ls /mnt/zstd-overlay/upper/%root%.local%share/mise/installs')" "node"
-  check "node_modules lives in the image" eq "$(x 'ls -d /mnt/zstd-overlay/upper/%work%adagia/node_modules | wc -l')" 1
+  check "node_modules lives in the image" eq "$(x 'ls -d /mnt/zstd-overlay/upper/%work/adagia/node_modules | wc -l')" 1
   done_scenario
 }
 
@@ -311,8 +317,8 @@ s11() {
   local out
   out=$(x 'cd /work/repo && ANTHROPIC_API_KEY=sk-ant-invalid timeout 90 claude -p "say hi" --max-turns 1 2>&1 | tail -2; echo; echo exit=$?')
   echo "    info  claude: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"
-  check "after claude started: the repo is mounted (hook ran with CLAUDE_PROJECT_DIR)" \
-    eq "$(x 'findmnt -rn -t overlay -o TARGET | grep -cx /work/repo')" 1
+  check "after claude started: the folder holding the repo is mounted (hook ran with CLAUDE_PROJECT_DIR)" \
+    eq "$(x 'findmnt -rn -t overlay -o TARGET | grep -cx /work')" 1
   check "and the default folders" eq "$(mounts)" 5
   done_scenario
 }

@@ -35,7 +35,7 @@ zstd-overlay migrate ~/.gradle   # move what a folder already holds into the ima
 zstd-overlay install             # copy to /usr/local/bin and add a SessionStart hook
 ```
 
-The default list is `$CLAUDE_PROJECT_DIR`, `~/.cache`, `~/.local/share`, `~/.local/bin`, `~/.npm`, and whichever of `~/.rustup ~/.cargo ~/go ~/.m2 ~/.gradle ~/.nuget ~/.dotnet ~/.bun` exist. That covers mise's tools (`~/.local/share/mise`), pnpm's store, uv's cache and Pythons, and the usual language caches.
+The default list is the folder that holds `$CLAUDE_PROJECT_DIR` (in a cloud session `/home/user`, so every repository is covered, also one attached later; the repository itself when that folder is a protected one such as `/root`), `~/.cache`, `~/.local/share`, `~/.local/bin`, `~/.npm`, and whichever of `~/.rustup ~/.cargo ~/go ~/.m2 ~/.gradle ~/.nuget ~/.dotnet ~/.bun` exist. That covers mise's tools (`~/.local/share/mise`), pnpm's store, uv's cache and Pythons, and the usual language caches.
 
 ### In a cloud environment
 
@@ -64,7 +64,7 @@ In a session that started before the hook existed, run `zstd-overlay up` once.
 
 - **A folder written to while it was not mounted is not mounted again.** Mounting would hide those writes under the image. `up` records the time of each mount; at the next mount it looks for anything in the folder with a newer ctime (which `cp -a` and `tar -p` cannot set back), refuses that folder, lists the files, and leaves it on the normal disk. Deletions count too. `zstd-overlay up --merge DIR` mounts it anyway and puts the changed files on top, after you have looked.
 - **The image reserves its space.** It is allocated with `fallocate` and leaves `ZSTD_OVERLAY_RESERVE_MB` (4096) free outside it. When the disk fills from outside, the writer outside gets "No space left on device" and the image keeps working. A sparse image would take that error itself, as an I/O error, and btrfs would turn read-only and lose its last writes; scenario 6 reproduced that before this design. `up` grows the image when the disk has room and gives space back, in 256 MiB steps, when the outside runs short.
-- **`migrate` never deletes before it has verified.** It copies the folder's merged view into a new layer, compares entry counts and byte totals, swaps the layer in, compares again, and only then deletes the old copy. A `kill -9` in the middle leaves the content intact (scenario 5). It refuses a repository: repositories are mounted, never migrated.
+- **`migrate` never deletes before it has verified.** It copies the folder's merged view into a new layer, compares entry counts and byte totals, swaps the layer in, compares again, and only then deletes the old copy. A `kill -9` in the middle leaves the content intact (scenario 5). It refuses a repository and the folder that holds one: repositories are mounted, never migrated.
 - **Refused targets:** `/`, `/usr` (except `/usr/local/...`), `/opt`, `/opt/claude-code`, `/etc`, `/var`, `/root`, `/home`, `~/.claude`, the image and its mount, a folder inside another mounted or listed folder, and the reverse.
 - A lock serialises concurrent runs. Non-root use stops with an error.
 

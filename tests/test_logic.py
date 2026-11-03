@@ -87,9 +87,26 @@ def test_default_list_covers_project_and_the_stack_toolchain(tmp_path):
     (tmp_path / ".rustup").mkdir()
     cfg = zo.Config(img="/i", mnt="/m", reserve=0, home=str(tmp_path), project="/work/repo")
     dirs = zo.default_dirs(cfg)
-    assert dirs[0] == "/work/repo"
+    assert dirs[0] == "/work"
     assert [os.path.relpath(d, tmp_path) for d in dirs[1:]] == [".cache", ".local/share", ".local/bin", ".npm",
                                                                  ".rustup"]  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("project", "covered"),
+    [
+        # A cloud session clones every repository under /home/user, also ones attached later.
+        ("/home/user/playground", "/home/user"),
+        # A session opened on /home/user itself: /home is protected, so the folder itself.
+        ("/home/user", "/home/user"),
+        # /root holds ~/.claude: the repository alone.
+        ("/root/repo", "/root/repo"),
+    ],
+)
+def test_the_folder_holding_the_repository_is_covered(project, covered):
+    cfg = zo.Config(img="/var/lib/zstd-overlay/disk.img", mnt="/mnt/zstd-overlay", reserve=0, home="/root",
+                    project=project)  # fmt: skip
+    assert zo.workspace(cfg) == covered
 
 
 def test_no_project_dir_outside_claude_code(tmp_path):

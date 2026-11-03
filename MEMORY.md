@@ -12,6 +12,7 @@
 - 2026-11-02: a folder written while unmounted is refused, not merged (owner's choice, "B"); `--merge` exists for after a look.
 - 2026-11-02: `install` never creates the image: a snapshot of a container with a 1 GiB reserved image grew by 1 GiB (scenario 12).
 - 2026-11-02: the empty btrfs ships as a base64 blob at the end of the script: the kernel cannot format btrfs and `mkfs.btrfs` is not in the base image; resizing uses `BTRFS_IOC_RESIZE` from Python's `fcntl.ioctl`.
+- 2026-11-03: the default list covers the folder holding the repository (/home/user in a cloud session), not the repository: repositories attached later land next to it (owner: "every repo, also future attached ones"). `migrate` refuses that folder too.
 - 2026-11-02: rewritten from bash to Python 3.11+ stdlib, one file (owner: "a well-tested tool deserves a real language"): unit tests for the logic, no perl/jq fallbacks; a cloud session has Python 3.13. The bash version (0253ed0) passed all 13 scenarios first; the scenarios are language-independent and gate the rewrite.
 
 ## Learnings

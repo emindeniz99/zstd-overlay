@@ -19,9 +19,11 @@ Usage:
   zstd-overlay status              disk use, capacity, mounted folders
   zstd-overlay doctor              what is mounted, what is not, and why
 
-Default list: $CLAUDE_PROJECT_DIR, ~/.cache, ~/.local/share, ~/.local/bin, ~/.npm,
-and whichever of ~/.rustup ~/.cargo ~/go ~/.m2 ~/.gradle ~/.nuget ~/.dotnet
-~/.bun exist.
+Default list: the folder holding $CLAUDE_PROJECT_DIR (in a cloud session
+/home/user, so every repository, also one attached later, is covered; the
+repository itself if that folder is a protected one), ~/.cache, ~/.local/share,
+~/.local/bin, ~/.npm, and whichever of ~/.rustup ~/.cargo ~/go ~/.m2 ~/.gradle
+~/.nuget ~/.dotnet ~/.bun exist.
 
 A VM restore drops every mount, so `install` runs `up --hook` from a
 SessionStart hook. A folder written to while it was not mounted is not mounted
@@ -196,8 +198,17 @@ def resolve(dirs: list[str]) -> tuple[list[str], list[str]]:
     return keep, refused
 
 
+def workspace(cfg: Config) -> str:
+    """The folder that holds the session's repository, so repositories cloned next to it later
+    (a cloud session puts them all under /home/user) are covered too. The repository itself
+    when that folder must not be covered (/root, /home, ...)."""
+    project = os.path.realpath(cfg.project)
+    parent = os.path.dirname(project)
+    return parent if guard(parent, cfg, []) is None else project
+
+
 def default_dirs(cfg: Config) -> list[str]:
-    dirs = [cfg.project] if cfg.project else []
+    dirs = [workspace(cfg)] if cfg.project else []
     dirs += [os.path.join(cfg.home, d) for d in (".cache", ".local/share", ".local/bin", ".npm")]
     dirs += [os.path.join(cfg.home, d) for d in DEFAULT_TOOL_DIRS if os.path.isdir(os.path.join(cfg.home, d))]
     return dirs
@@ -554,7 +565,7 @@ class Session:
         for r in refused:
             self.refuse(r)
         for d in keep:
-            if d == os.path.realpath(cfg.project or "/nonexistent") or os.path.exists(os.path.join(d, ".git")):
+            if (cfg.project and inside(os.path.realpath(cfg.project), d)) or os.path.exists(os.path.join(d, ".git")):
                 self.refuse(f"refused: {d} is a repository; repositories are mounted, never migrated")
                 continue
             if d in our_overlays(mounts_now(), cfg.mnt):
