@@ -148,3 +148,11 @@ The review's fixes (`70a5063`, `02491ba`): 20 of 20 scenarios; 81 unit tests on 
 **The setup script reached the paste field's limit.** The plain script was 64,286 bytes at `ca8178c` (the tool 63,950: 53,713 of code, 10,227 of blob). Compressed whole with xz -9e it is 19,228 bytes, 25,640 in base64, and `dabd35d` shipped it that way, 27,211 bytes with a Python decoder and a SHA-256 check. The owner preferred a paste that can be read, so the blob shrank instead: the empty filesystem's tar held 4.3 MiB because mkfs had left zero-filled blocks allocated, while only 47 blocks (188 KiB) are not zero. With the zero blocks punched into holes and xz -9e in place of gzip, the blob is 1,908 bytes, 2,578 in base64 (from 10,173), and the plain script 57.6 KB. The filesystem bytes are the same: the new blob was extracted through the loader's own `tarfile` path and compared with the old one over all 100 GiB.
 
 The run of these changes: 21 of 21 scenarios, 85 unit tests on Python 3.11 to 3.15.
+
+## 2026-11-03, field report from the second session (resumes 16:06 and 16:52)
+
+- The startup-file write-back (`fef48f6`) on a real resume: a probe written under `.claude/` while mounted sat in the image's upper layer; the 16:06 hook wrote it back ("wrote 1 startup files back to the normal disk") with the re-read note, and afterwards the file was on the normal disk with the same content, with no copy in the image and nothing refused.
+- The probe deleted inside the mount (a whiteout in the image): the 16:52 hook deleted it from the normal disk, which is right, but reported it with the same "wrote 1 startup files back" line. Fixed: deletes are reported on their own line, with a unit test on the wording.
+- `9e828fbb7f4d` (the tool of `fff3d52`, taken with `git show`) installed by hand at 16:08 and ran the 16:52 resume: exit 0, `doctor` 9 of 9 ok, nothing refused, `git fsck` clean, `loop0` with direct I/O on. Its `version` says `working copy`, as a `git show` copy must; the README now says so.
+- Not exercised: the mount retry from a backup root (`517c434`); the image has never failed to mount.
+- Unchanged by design: an MCP server started before the mount (xcodebuildmcp) triggers the "started earlier" note on every resume.
