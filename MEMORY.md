@@ -7,6 +7,8 @@
 
 ## Decisions
 
+- 2026-11-03: a conflict is a file written while unmounted that the image also has a version of (it would be hidden); the repository folder refuses on one, the default home folders (caches) take the newer file. Each `.git` stays on the normal disk, bind-mounted: the platform rewrites every `.git/config` on resume, before any hook, so the old rule refused the repository folder on every resume (field report, reproduced as scenario 14).
+
 - 2026-11-02: btrfs `compress-force=zstd:3` under overlayfs, kernel features only: zstd:3 was the best writable ratio per write cost of 15 configurations measured; squashfs/erofs/DwarFS are read-only ([evidence](docs/evidence/2026-11-02-cloud-session-measurements.md)).
 - 2026-11-02: the image is preallocated (`fallocate`, `nodiscard`) and leaves 4 GiB outside: a sparse image turned read-only when the disk filled from outside.
 - 2026-11-02: a folder written while unmounted is refused, not merged (owner's choice, "B"); `--merge` exists for after a look.
@@ -16,6 +18,12 @@
 - 2026-11-02: rewritten from bash to Python 3.11+ stdlib, one file (owner: "a well-tested tool deserves a real language"): unit tests for the logic, no perl/jq fallbacks; a cloud session has Python 3.13. The bash version (0253ed0) passed all 13 scenarios first; the scenarios are language-independent and gate the rewrite.
 
 ## Learnings
+
+- 2026-11-03: overlayfs refuses FICLONE from a lower-layer file (EXDEV) while reporting one st_dev; uv 0.13 then stops ("Failed to clone"). Fix: a cache folder's first mount migrates its content into the image (marker `stamps/<key>.migrated`).
+- 2026-11-03: a session that runs zstd-overlay leaves only its reserve (4 GiB) free; Docker tests there need `ZSTD_OVERLAY_RESERVE_MB=16384 zstd-overlay up` first, which shrank the live image 25 -> 13 GB in under a second.
+
+- 2026-11-03: written before the SessionStart hook on every resume: each repository's `.git/config` (the platform, 4 s after boot), `~/.npm/_logs` and `_cacache` (`npm exec` MCP servers), `~/.cache/claude-cli-nodejs/*/mcp-logs-*` (Claude Code). No earlier mount point exists: the setup script runs only for the cache, PID 1 is `process_api`.
+- 2026-11-03: the environment embeds the setup script as pasted; it never fetches the tool. A stale install means a stale paste; `zstd-overlay version` and `doctor` print the file's hash.
 
 - 2026-11-03: the platform docs say cloud sessions run only server-managed and repository hooks; a hook in the VM's own `~/.claude/settings.json`, written by the setup script, ran anyway. Revisit if a session starts with nothing mounted.
 

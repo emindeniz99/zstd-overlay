@@ -97,3 +97,15 @@ A new cloud environment got the setup script built from commit `dd94e60` (the ve
 So the environment cache snapshot kept `~/.claude/settings.json` and Claude Code ran its hook, although the platform docs list only server-managed and repository hooks for cloud sessions. Not observed yet: the hook on `resume`.
 
 Docker runs for the later commits: the folder-holding-the-repository default (`f489928`) passed 13 of 13 scenarios; the `doctor` and own-shell fixes passed scenarios 1, 4 and 11 again, with checks added for both.
+
+## Resume field report, 2026-11-03
+
+The same environment's session, after a VM resume, reported the hook refused `/home/user/playground` (`.git/config` written 05:14:21, before the hook) and `/root/.npm` (`_cacache` and `_logs` written 05:14:22). The session that wrote this note found the same in its own VM: boot at 04:56:22, every repository's `.git/config` rewritten at 04:56:26, `~/.npm/_logs` getting a debug log at each start of the `npm exec` MCP server, and Claude Code writing `~/.cache/claude-cli-nodejs/*/mcp-logs-*/<time>.jsonl` at 04:56:28. Its installed script was the paste from `dd94e60`: the environment embeds the setup script and never fetches the tool.
+
+Scenario 14 reproduces that resume. Before the fix it refused the repository folder and `~/.npm` (3 of 5 folders mounted) and hid the session's last commit. After it, all 5 mount, the commit and both sides of `.git/config` are there, the npm cache file takes the newer version, and a file the session wrote and the normal disk changed again still refuses the repository folder. Scenario 15 moves a `.git` an earlier version left in the image back to the normal disk without loss.
+
+## Reflinks from the lower layer, 2026-11-03
+
+In the session with `/home/user` and `~/.cache` mounted, `uv run --isolated --python 3.12 pytest` failed: `Failed to clone .../uv/archive-v0/.../RECORD to .../uv/builds-v0/... Invalid cross-device link (os error 18)`. `cp --reflink=always` from a file that was in `~/.cache` before the mount failed the same way; from a file written after the mount it worked. overlayfs reports one device for both layers and refuses to clone from the lower one. The default home folders held 2 GB on the normal disk in that VM (`~/.cache` 705M, `~/.local/share` 586M, `~/.npm` 242M, `~/.local/bin` 232M, `~/.cargo` 134M, `~/.bun` 103M), so their first mount now moves that into the image; scenario 16 covers it.
+
+With the session's image reserving all but 4 GiB, the Docker tests ran out of space (the test container's image fell to its 512 MiB floor and mise reported ENOSPC). `ZSTD_OVERLAY_RESERVE_MB=16384 zstd-overlay up` shrank the live image from 25 to 13 GB in under a second with every folder mounted.

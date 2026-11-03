@@ -10,6 +10,8 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import shutil
+import stat
 import sys
 import time
 from pathlib import Path
@@ -173,14 +175,101 @@ def test_an_edit_with_its_mtime_set_back_is_still_reported(tmp_path):
     assert str(d / "a") in zo.changed_since(str(d), stamp)
 
 
-def test_a_delete_is_reported_as_its_folder(tmp_path):
-    # Mounting after a delete would bring the deleted file back from the image.
+def test_a_delete_alone_is_not_reported(tmp_path):
+    # Only files the image would hide count. After a delete on the normal disk the file stays
+    # deleted, unless the session changed it too: then the image's version shows (a limit,
+    # documented in the README: no write is hidden, but a delete can be undone).
     d = tmp_path / "d"
     (d / "sub").mkdir(parents=True)
     (d / "sub" / "gone").write_text("x")
     stamp = _stamp_then_wait(tmp_path)
     (d / "sub" / "gone").unlink()
-    assert zo.changed_since(str(d), stamp) == [str(d / "sub")]
+    assert zo.changed_since(str(d), stamp) == []
+
+
+def test_git_folders_are_not_entered(tmp_path):
+    # .git stays on the normal disk, so the platform's write to .git/config is not a change.
+    d = tmp_path / "d"
+    (d / "repo" / ".git").mkdir(parents=True)
+    stamp = _stamp_then_wait(tmp_path)
+    (d / "repo" / ".git" / "config").write_text("[core]")
+    (d / "repo" / "file").write_text("x")
+    assert zo.changed_since(str(d), stamp, frozenset({str(d / "repo" / ".git")})) == [str(d / "repo" / "file")]
+
+
+# --- what the image would hide --------------------------------------------------------------
+
+
+def test_a_file_the_image_has_no_version_of_shows_through(tmp_path):
+    # A new log file written before the hook (an MCP server, Claude Code) is not a conflict.
+    (tmp_path / "logs").mkdir()
+    assert not zo.hidden_by_upper("logs/new.log", str(tmp_path))
+    assert not zo.hidden_by_upper("elsewhere/new.log", str(tmp_path))
+
+
+def test_a_file_the_image_also_has_would_be_hidden(tmp_path):
+    (tmp_path / "repo").mkdir()
+    (tmp_path / "repo" / "notes.txt").write_text("the session's version")
+    assert zo.hidden_by_upper("repo/notes.txt", str(tmp_path))
+
+
+def test_a_file_where_the_lower_side_has_a_folder_hides_it(tmp_path):
+    (tmp_path / "x").write_text("a file in the image")
+    assert zo.hidden_by_upper("x/inside.txt", str(tmp_path))
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="mknod and trusted.* xattrs need root")
+def test_a_deleted_or_replaced_folder_in_the_image_hides_what_is_below(tmp_path):
+    os.mknod(tmp_path / "gone", 0o600 | stat.S_IFCHR, 0)  # overlayfs's whiteout
+    assert zo.hidden_by_upper("gone/file", str(tmp_path))
+    (tmp_path / "replaced").mkdir()
+    os.setxattr(tmp_path / "replaced", "trusted.overlay.opaque", b"y")
+    assert zo.hidden_by_upper("replaced/file", str(tmp_path))
+
+
+def test_repositories_are_found_two_levels_down_but_not_in_node_modules(tmp_path):
+    for p in ("a/.git", "owner/b/.git", "c/node_modules/pkg/.git", "deep/x/y/z/.git"):
+        (tmp_path / p).mkdir(parents=True)
+    found = [os.path.relpath(g, tmp_path) for g in zo.git_dirs(str(tmp_path))]
+    assert found == ["a/.git", "owner/b/.git"]
+
+
+# --- moving .git out of the image -----------------------------------------------------------
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="mknod needs root")
+def test_merge_tree_applies_deletes_and_keeps_newer_files(tmp_path):
+    upper, lower = tmp_path / "upper", tmp_path / "lower"
+    (upper / "refs").mkdir(parents=True)
+    (lower / "refs").mkdir(parents=True)
+    (lower / "index.lock").write_text("stale")
+    os.mknod(upper / "index.lock", 0o600 | stat.S_IFCHR, 0)  # the session deleted it
+    (upper / "refs" / "main").write_text("session commit")  # the session moved the branch
+    (lower / "refs" / "main").write_text("old commit")
+    os.utime(lower / "refs" / "main", (1, 1))
+    (lower / "FETCH_HEAD").write_text("written after the session")
+    (upper / "FETCH_HEAD").write_text("older")
+    os.utime(upper / "FETCH_HEAD", (1, 1))
+    zo.merge_tree(str(upper), str(lower))
+    assert not (lower / "index.lock").exists()
+    assert (lower / "refs" / "main").read_text() == "session commit"
+    assert (lower / "FETCH_HEAD").read_text() == "written after the session"
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+def test_both_sides_of_git_config_are_kept(tmp_path):
+    # The session ran `git push -u` (branch.main.remote); the platform rewrote the file on resume.
+    upper, lower = tmp_path / "upper", tmp_path / "lower"
+    upper.mkdir()
+    lower.mkdir()
+    (upper / "config").write_text('[core]\n\tbare = false\n[branch "main"]\n\tremote = origin\n')
+    os.utime(upper / "config", (1, 1))
+    (lower / "config").write_text("[core]\n\tbare = false\n\tsshCommand = platform\n")
+    zo.merge_tree(str(upper), str(lower))
+    text = (lower / "config").read_text()
+    assert "sshCommand = platform" in text
+    assert "remote = origin" in text
+    assert text.count("bare = false") == 1
 
 
 # --- mountinfo ---------------------------------------------------------------------------

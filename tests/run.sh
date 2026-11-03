@@ -64,7 +64,9 @@ x() { docker exec "$CT" bash -c "$1" 2>>"$LOG"; }            # run, stdout back
 xs() { docker exec "$CT" bash -c "$1" >>"$LOG" 2>&1; }       # run silently, status back
 restart() { docker restart -t 1 "$CT" >/dev/null; }
 ZO=/src/zstd-overlay
-mounts() { x 'findmnt -rn -t overlay -o OPTIONS | grep -c "upperdir=/mnt/zstd-overlay/upper/" || true'; }
+# /src is excluded: when the host itself runs zstd-overlay, the test's own bind mount of the
+# project shows up as one of its overlays inside the container.
+mounts() { x 'findmnt -rn -t overlay -o TARGET,OPTIONS | grep -v "^/src " | grep -c "upperdir=/mnt/zstd-overlay/upper/" || true'; }
 used_mb() { x 'sync; df -B1M --output=used /mnt/zstd-overlay | tail -1 | tr -d " "'; }   # what btrfs holds, compressed
 alloc_mb() { x 'du -m /var/lib/zstd-overlay/disk.img | cut -f1'; }                        # what the image reserves on disk
 
@@ -138,28 +140,18 @@ s3() {
 }
 
 s4() {
-  scenario 4 "written while unmounted: refused (B), --merge on request"
+  scenario 4 "written while unmounted: hidden writes refused (B), --merge on request"
   start s4
-  xs "$ZO up && echo 'from the session' > /work/repo/session.txt"
+  # The session writes a new file and changes README: both live in the image.
+  xs "$ZO up && echo 'from the session' > /work/repo/session.txt && echo 'session edit' >> /work/repo/README"
   restart
   xs 'echo "edited while unmounted" >> /work/repo/README'
   local out; out=$(x "$ZO up; echo exit=\$?")
   check "up exits 3" has "$out" "exit=3"
-  check "repo NOT MOUNTED, README named" has "$out" "/work/repo/README"
+  check "repo folder NOT MOUNTED, README named" has "$out" "/work/repo/README"
   check "the other 4 folders mounted" eq "$(mounts)" 4
-  check "the edit is visible (repo stays on the normal disk)" has "$(x 'cat /work/repo/README')" "edited while unmounted"
+  check "the edit is visible (the folder stays on the normal disk)" has "$(x 'cat /work/repo/README')" "edited while unmounted"
   check "session.txt not visible yet (it is in the image)" eq "$(x 'ls /work/repo/session.txt 2>/dev/null | wc -l')" 0
-  out=$(x "$ZO up --merge /work; echo exit=\$?")
-  check "--merge exits 0" has "$out" "exit=0"
-  check "after merge: the edit is kept" has "$(x 'cat /work/repo/README')" "edited while unmounted"
-  check "after merge: session.txt is back" has "$(x 'cat /work/repo/session.txt')" "from the session"
-  restart
-  out=$(x "$ZO up; echo exit=\$?")
-  check "unchanged folder after restart: no false alarm" has "$out" "exit=0"
-  restart
-  xs 'rm /work/repo/LOWERONLY'
-  out=$(x "$ZO up; echo exit=\$?")
-  check "a deletion while unmounted is caught too" has "$out" "NOT MOUNTED: /work changed"
   out=$(x "$ZO doctor")
   check "doctor names the changed folder" has "$out" "CHANGED   /work ("
   out=$(x "$ZO up --hook; echo exit=\$?")
@@ -167,6 +159,18 @@ s4() {
   out=$(x "$ZO up --hook | jq -r '.systemMessage, .hookSpecificOutput.hookEventName, .hookSpecificOutput.additionalContext'")
   check "hook mode: a warning for the user" has "$out" "1 folder(s) not compressed this session"
   check "hook mode: the details and the --merge rule for Claude" has "$out" "only after the user has looked at the listed files and agreed"
+  out=$(x "$ZO up --merge /work; echo exit=\$?")
+  check "--merge exits 0" has "$out" "exit=0"
+  check "after merge: the normal disk's edit wins" has "$(x 'cat /work/repo/README')" "edited while unmounted"
+  check "after merge: session.txt is back" has "$(x 'cat /work/repo/session.txt')" "from the session"
+  restart
+  out=$(x "$ZO up; echo exit=\$?")
+  check "unchanged folder after restart: no false alarm" has "$out" "exit=0"
+  restart
+  xs 'echo "a new file on the normal disk" > /work/repo/new-outside.txt; rm /work/repo/LOWERONLY'
+  out=$(x "$ZO up; echo exit=\$?")
+  check "a new file or a delete the image has no version of: mounted, nothing to hide" has "$out" "exit=0"
+  check "the new file shows, the deleted one stays deleted" eq "$(x 'cat /work/repo/new-outside.txt; ls /work/repo/LOWERONLY 2>/dev/null | wc -l')" $'a new file on the normal disk\n0'
   done_scenario
 }
 
@@ -362,11 +366,93 @@ s13() {
   done_scenario
 }
 
+s14() {
+  scenario 14 "resume: the platform and MCP servers write before the hook runs"
+  start s14
+  local commit='git -c user.email=t@t -c user.name=t commit -q'
+  xs "cd /work/repo && git add -A && $commit -m base"
+  xs "$ZO up"
+  # In the session: git writes .git/config (push -u does), npm its cache and a log, Claude Code an MCP log.
+  xs "cd /work/repo && git config branch.main.remote origin && echo work > notes.txt && git add notes.txt && $commit -m session
+      mkdir -p /root/.npm/_cacache/index-v5/aa /root/.npm/_logs /root/.cache/cc/mcp-logs
+      echo one > /root/.npm/_cacache/index-v5/aa/bucket; echo s > /root/.npm/_logs/session.log; echo s > /root/.cache/cc/mcp-logs/session.jsonl"
+  restart
+  # Before the hook, as measured in a cloud session: the platform rewrites every repository's
+  # .git/config; `npm exec` (an MCP server) writes its cache and a log; Claude Code logs MCP.
+  xs 'git -C /work/repo config core.sshCommand platform-wrote-this
+      mkdir -p /root/.npm/_cacache/index-v5/aa /root/.npm/_logs /root/.cache/cc/mcp-logs
+      echo two > /root/.npm/_cacache/index-v5/aa/bucket; echo r > /root/.npm/_logs/resume.log; echo r > /root/.cache/cc/mcp-logs/resume.jsonl'
+  local out; out=$(x "$ZO up --hook; echo exit=\$?")
+  check "hook exits 0" has "$out" "exit=0"
+  check "no folder refused" eq "$(printf '%s' "$out" | grep -c 'not compressed')" 0
+  check "all 5 folders mounted" eq "$(mounts)" 5
+  check "the session's commit and file are there" eq "$(x 'git -C /work/repo log --format=%s -1; cat /work/repo/notes.txt')" $'session\nwork'
+  check ".git/config keeps the platform's write" eq "$(x 'git -C /work/repo config core.sshCommand')" "platform-wrote-this"
+  check ".git/config keeps the session's write" eq "$(x 'git -C /work/repo config branch.main.remote')" "origin"
+  check "git metadata stays on the normal disk" eq "$(x 'ls -d /mnt/zstd-overlay/upper/%work/repo/.git 2>/dev/null | wc -l')" 0
+  check "a cache file written on both sides: the newer one wins" eq "$(x 'cat /root/.npm/_cacache/index-v5/aa/bucket')" "two"
+  check "new log files from both sides are all there" eq "$(x 'ls /root/.npm/_logs /root/.cache/cc/mcp-logs | grep -cE "[.](log|jsonl)$"')" 4
+  check "git works: status, commit" xs "cd /work/repo && git status --short >/dev/null && echo more >> notes.txt && $commit -am more"
+  # Still strict for work: a file the session wrote, changed again on the normal disk, is refused.
+  restart
+  xs 'echo outside > /work/repo/notes.txt'
+  out=$(x "$ZO up; echo exit=\$?")
+  check "a real conflict in the repository folder is still refused" has "$out" "NOT MOUNTED: /work changed"
+  check "and names the file" has "$out" "/work/repo/notes.txt"
+  check "the caches still mount" eq "$(mounts)" 4
+  done_scenario
+}
+
+s15() {
+  scenario 15 "migration: .git left in the image by an earlier version moves out without loss"
+  start s15
+  local commit='git -c user.email=t@t -c user.name=t commit -q'
+  xs "cd /work/repo && git add -A && $commit -m base && $ZO up /root/.cache"   # creates the image
+  # Mount /work the way versions before this one did: .git inside the overlay.
+  xs "mkdir -p /mnt/zstd-overlay/upper/%work /mnt/zstd-overlay/work/%work
+      mount -t overlay overlay -o lowerdir=/work,upperdir=/mnt/zstd-overlay/upper/%work,workdir=/mnt/zstd-overlay/work/%work /work
+      touch /mnt/zstd-overlay/stamps/%work
+      cd /work/repo && git config branch.main.remote origin && echo work > notes.txt && git add notes.txt && $commit -m session"
+  check "precondition: the old layout has .git in the image" eq "$(x 'ls -d /mnt/zstd-overlay/upper/%work/repo/.git | wc -l')" 1
+  restart
+  xs 'git -C /work/repo config core.sshCommand platform-wrote-this'
+  local out; out=$(x "$ZO up; echo exit=\$?")
+  check "up exits 0" has "$out" "exit=0"
+  check "it says what it moved" has "$out" "moved /work/repo/.git out of the image"
+  check "the session's commit is there" eq "$(x 'git -C /work/repo log --format=%s -1')" "session"
+  check "both config writes survive" eq "$(x 'git -C /work/repo config core.sshCommand; git -C /work/repo config branch.main.remote')" $'platform-wrote-this\norigin'
+  check "no .git left in the image" eq "$(x 'ls -d /mnt/zstd-overlay/upper/%work/repo/.git 2>/dev/null | wc -l')" 0
+  check "git fsck is clean" xs 'git -C /work/repo fsck --no-progress'
+  done_scenario
+}
+
+s16() {
+  scenario 16 "a cache that was full before the first mount moves into the image once"
+  start s16
+  # What a cloud image ships in ~/.cache, ~/.local/share and the rest is on the normal disk.
+  xs 'mkdir -p /root/.cache/uv/archive && head -c 5M /dev/urandom > /root/.cache/uv/archive/pkg.whl && yes cache | head -c 50M > /root/.cache/big.txt'
+  local out; out=$(x "$ZO up; echo exit=\$?")
+  check "up exits 0" has "$out" "exit=0"
+  check "it says it moved the cache" has "$out" "migrated: /root/.cache"
+  # uv clones (reflinks) cached files; overlayfs refuses that from the lower layer (EXDEV), which stopped uv.
+  check "a reflink from a file the cache held before works" xs 'cp --reflink=always /root/.cache/uv/archive/pkg.whl /root/.cache/uv/clone.whl'
+  check "nothing is left of it on the normal disk" eq "$(x 'mkdir -p /tmp/r && mount --bind / /tmp/r && ls -A /tmp/r/root/.cache | wc -l; umount /tmp/r')" 0
+  check "the content is intact" eq "$(x 'wc -c < /root/.cache/big.txt')" 52428800
+  out=$(x "$ZO up; echo exit=\$?")
+  check "a second up moves nothing" eq "$(printf '%s\n' "$out" | grep -c migrated)" 0
+  restart
+  xs 'echo r > /root/.cache/written-before-the-hook.log'
+  out=$(x "$ZO up --hook; echo exit=\$?")
+  check "after a restart: mounted, nothing moved again" eq "$(printf '%s\n' "$out" | grep -c 'migrated\|not compressed'):$(mounts)" "0:5"
+  check "the write from before the hook shows" eq "$(x 'cat /root/.cache/written-before-the-hook.log')" "r"
+  done_scenario
+}
+
 # --- main ------------------------------------------------------------------------
 
 [ "$(id -u)" = 0 ] || { echo "run as root (privileged containers)"; exit 2; }
 build_images || { echo "could not build the test images; see $LOG"; exit 2; }
-want=("$@"); [ ${#want[@]} -gt 0 ] || want=(1 2 3 4 5 6 7 8 9 10 11 12 13)
+want=("$@"); [ ${#want[@]} -gt 0 ] || want=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16)
 for n in "${want[@]}"; do "s$n"; done
 echo; echo "== $PASS passed, $FAIL failed, $SKIP skipped (log: $LOG)"; printf '   %s\n' "${RESULTS[@]}"
 [ "$FAIL" = 0 ]
