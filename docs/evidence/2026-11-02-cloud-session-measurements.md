@@ -136,3 +136,11 @@ The full run of `c9776ba` (cache folders kept empty on the normal disk): 18 of 1
 The full run of `e7cd709` (the pre-mount leftover fix): 19 of 19 scenarios, 134 of 134 checks passed; 64 unit tests on Python 3.11 to 3.15.
 
 The full run of `fef48f6` (startup files kept on the normal disk): 20 of 20 scenarios, 146 of 146 checks passed; 67 unit tests on Python 3.11 to 3.15.
+
+## 2026-11-03, after the code review
+
+The review's fixes (`70a5063`, `02491ba`): 20 of 20 scenarios; 81 unit tests on Python 3.11 to 3.15, each of the 14 new ones failing on the previous version. The installed version `9758b9951176` then handled two real resumes in this session (boots 09:26 and 15:00) with every folder mounted and nothing refused.
+
+**The loop device cached the image twice.** With `/sys/block/loop0/loop/dio` at 0, reading a 1 GiB file from the image grew `Cached` in `/proc/meminfo` by 2,055 MiB (after `echo 3 > drop_caches`): the backing file's pages and btrfs's. With `losetup --direct-io=on` on the live device it grew by 1,025 MiB, and the cold read took 0.55 s instead of 0.73 s. The tool now sets direct I/O (`LOOP_SET_DIRECT_IO`) when it mounts the image.
+
+**The normal disk has no journal.** The kernel log shows `EXT4-fs (vda): mounted filesystem ... r/w without journal`. So an abrupt stop loses the same window outside the image as inside it (both flush every 30 s), and only the image is guaranteed consistent afterwards.
