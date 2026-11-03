@@ -134,3 +134,5 @@ The full run of `c9776ba` (cache folders kept empty on the normal disk): 18 of 1
 - Its edge case: those 12,852 files below `~/.npm` were copies `94085a131cbe`'s merge had left behind, not writes made while unmounted, and `absorb` let them replace the image's versions. Harmless for npm's content-addressed cache, but an index entry appended while mounted could have been rolled back. `absorb` now drops a file whose ctime predates the last mount when the image has its own version; scenario 19 reproduces the upgrade.
 
 The full run of `e7cd709` (the pre-mount leftover fix): 19 of 19 scenarios, 134 of 134 checks passed; 64 unit tests on Python 3.11 to 3.15.
+
+The full run of `fef48f6` (startup files kept on the normal disk): 20 of 20 scenarios, 146 of 146 checks passed; 67 unit tests on Python 3.11 to 3.15.
