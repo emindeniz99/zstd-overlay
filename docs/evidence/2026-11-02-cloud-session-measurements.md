@@ -109,3 +109,5 @@ Scenario 14 reproduces that resume. Before the fix it refused the repository fol
 In the session with `/home/user` and `~/.cache` mounted, `uv run --isolated --python 3.12 pytest` failed: `Failed to clone .../uv/archive-v0/.../RECORD to .../uv/builds-v0/... Invalid cross-device link (os error 18)`. `cp --reflink=always` from a file that was in `~/.cache` before the mount failed the same way; from a file written after the mount it worked. overlayfs reports one device for both layers and refuses to clone from the lower one. The default home folders held 2 GB on the normal disk in that VM (`~/.cache` 705M, `~/.local/share` 586M, `~/.npm` 242M, `~/.local/bin` 232M, `~/.cargo` 134M, `~/.bun` 103M), so their first mount now moves that into the image; scenario 16 covers it.
 
 With the session's image reserving all but 4 GiB, the Docker tests ran out of space (the test container's image fell to its 512 MiB floor and mise reported ENOSPC). `ZSTD_OVERLAY_RESERVE_MB=16384 zstd-overlay up` shrank the live image from 25 to 13 GB in under a second with every folder mounted.
+
+The full run of `49d0831` (scenarios 1 to 16): 16 of 16 scenarios, 111 of 111 checks passed.
