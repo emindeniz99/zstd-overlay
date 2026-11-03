@@ -475,11 +475,36 @@ s17() {
   done_scenario
 }
 
+s18() {
+  scenario 18 "a migration killed after the original was moved aside recovers, at each step"
+  start s18
+  xs "$ZO up /root/.cache"   # creates the image
+  local sum='cd /root/.gradle && find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-16'
+  local U=/mnt/zstd-overlay/upper/%root%.gradle
+  # Build each state the code passes through between its rename and its final check, as a
+  # kill (or a VM pause) would leave it, then run the command a session would run next.
+  local step
+  for step in renamed swapped; do
+    xs "rm -rf /root/.gradle /root/.gradle.zstd-overlay-old $U $U.migrating /mnt/zstd-overlay/stamps/%root%.gradle*
+        mkdir -p /root/.gradle/caches && for i in 1 2 3; do yes g\$i | head -c 5M > /root/.gradle/caches/f\$i; done"
+    local before; before=$(x "$sum")
+    xs "mkdir -p $U && cp -a /root/.gradle/. $U.migrating/ && mv /root/.gradle /root/.gradle.zstd-overlay-old && mkdir /root/.gradle"
+    [ $step = swapped ] && xs "rm -rf $U && mv $U.migrating $U"
+    local out; out=$(x "$ZO up; echo exit=\$?")
+    check "killed after '$step': up recovers and says so" has "$out" "recovered an interrupted migration of /root/.gradle"
+    check "killed after '$step': then migrates and exits 0" has "$out" $'migrated: /root/.gradle'
+    check "killed after '$step': content intact" eq "$(x "$sum")" "$before"
+    check "killed after '$step': nothing left over" eq "$(x "ls -d /root/.gradle.zstd-overlay-old $U.migrating 2>/dev/null | wc -l")" 0
+    xs 'umount /root/.gradle 2>/dev/null; true'
+  done
+  done_scenario
+}
+
 # --- main ------------------------------------------------------------------------
 
 [ "$(id -u)" = 0 ] || { echo "run as root (privileged containers)"; exit 2; }
 build_images || { echo "could not build the test images; see $LOG"; exit 2; }
-want=("$@"); [ ${#want[@]} -gt 0 ] || want=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17)
+want=("$@"); [ ${#want[@]} -gt 0 ] || want=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18)
 for n in "${want[@]}"; do "s$n"; done
 echo; echo "== $PASS passed, $FAIL failed, $SKIP skipped (log: $LOG)"; printf '   %s\n' "${RESULTS[@]}"
 [ "$FAIL" = 0 ]

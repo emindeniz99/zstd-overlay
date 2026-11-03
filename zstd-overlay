@@ -549,6 +549,25 @@ class Session:
             shutil.rmtree(ug)
             self.say(f"moved {lg} out of the image (git metadata stays on the normal disk)")
 
+    def recover_migration(self, path: str) -> bool:
+        """Undo the second half of a migration that was killed (a VM pause during the first
+        start can do it): `path` was renamed to `path.zstd-overlay-old` and an empty folder took
+        its place. Put the original back; the image holds either its old layer or the verified
+        copy, and either one over the original shows the folder as it was. The migration then
+        simply runs again. False when both sides hold files, which nothing here writes."""
+        old = path + ".zstd-overlay-old"
+        if not os.path.isdir(old):
+            return True
+        if os.path.isdir(path) and os.listdir(path):
+            self.refuse(f"refused: {path} and {old} both hold files (an interrupted migrate?); nothing changed")
+            return False
+        if os.path.isdir(path):
+            os.rmdir(path)
+        os.rename(old, path)
+        shutil.rmtree(self.upper(path) + ".migrating", ignore_errors=True)
+        self.say(f"recovered an interrupted migration of {path}; nothing was lost")
+        return True
+
     def fold_nested_layers(self, path: str) -> None:
         """Fold into the normal disk the layer of any folder inside `path` that was mounted on
         its own before (versions up to dd94e60 mounted the repository, later ones the folder
@@ -568,7 +587,9 @@ class Session:
                     os.unlink(stamp)
             self.say(f"folded the earlier layer of {inner} into the normal disk (newer files win)")
 
-    def mount_dir(self, path: str, merge: bool = False, lenient: bool = False, quiet: bool = False) -> bool:
+    def mount_dir(
+        self, path: str, merge: bool = False, lenient: bool = False, quiet: bool = False, recover: bool = True
+    ) -> bool:
         """Mount `path`. A file the image would hide is a conflict: for `merge` the normal disk's
         version wins; for a `lenient` folder (a cache) the newer version wins; otherwise the
         folder is refused and stays on the normal disk."""
@@ -578,6 +599,8 @@ class Session:
             return True
         if why := guard(path, cfg, mounted):
             self.refuse(f"refused: {path} ({why})")
+            return False
+        if recover and not self.recover_migration(path):
             return False
         os.makedirs(path, exist_ok=True)
         key, upper = key_of(path), self.upper(path)
@@ -680,6 +703,8 @@ class Session:
         for r in refused:
             self.refuse(r)
         for d in keep:
+            if not self.recover_migration(d):  # before looking at what the folder holds
+                continue
             marker = self.stamp(d) + ".migrated"
             if d in caches and not os.path.exists(marker) and d not in our_overlays(mounts_now(), self.cfg.mnt):
                 # The first mount of a cache moves what it already holds into the image: a tool
@@ -741,7 +766,8 @@ class Session:
         os.rename(new, os.path.join(cfg.mnt, "upper", key))
         with contextlib.suppress(FileNotFoundError):
             os.unlink(self.stamp(d))
-        if self.mount_dir(d, lenient=lenient) and tree_sig(d) == before:
+        # recover=False: `old` is this migration's own, deleted below once the check passes.
+        if self.mount_dir(d, lenient=lenient, recover=False) and tree_sig(d) == before:
             shutil.rmtree(old)
             self.say(f"migrated: {d} ({gib(before[1])} now in the image)")
             return True
