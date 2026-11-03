@@ -49,14 +49,13 @@ A VM restore keeps files but drops every mount, so the folders must be mounted a
 
 To change the reserve or the image's place, set `ZSTD_OVERLAY_RESERVE_MB` (and the others under Environment in `--help`) in the environment's variables; a session reads them again at every restore. Not tested: a cloud thread in a Claude project, where repository hooks do not run; whether it runs a user-level hook is unknown.
 
-Run `install` from the environment's setup script. This repository is private, so the setup script cannot download the file; paste it in:
+Run `install` from the environment's setup script. This repository is private, so the setup script cannot download the file; paste it in. `build-setup-script.sh` writes the script for a commit: the tool, taken with `git archive` so that `zstd-overlay version` names the commit and its date, wrapped in a heredoc, then `install`:
 
 ```bash
-cat > /tmp/zstd-overlay <<'ZSTD_OVERLAY_EOF'
-# ...the whole file...
-ZSTD_OVERLAY_EOF
-python3 /tmp/zstd-overlay install
+projects/zstd-overlay/build-setup-script.sh > setup-script.sh    # HEAD; or name a commit
 ```
+
+`zstd-overlay version` prints the installed file's hash, the commit and the commit date; `doctor` adds when the file was installed, which is when the environment cache was built or the session updated by hand. A file taken from a checkout with `git show` or `cp` carries no commit and says `working copy`; its hash also differs from the built one by that line.
 
 `install` creates no image. The image appears at the first session start, after the environment cache snapshot, so the snapshot holds a few kilobytes instead of a disk image.
 
@@ -65,8 +64,8 @@ Checked on 2026-11-03 in a new environment with this setup script: the snapshot 
 A session that is already running never sees a changed setup script: the script runs only when the environment cache is built, not on resume. Update such a session by hand, once:
 
 ```bash
-git -C /home/user/playground fetch origin claude/zstd-overlay   # or wherever the new file is
-git -C /home/user/playground show origin/claude/zstd-overlay:projects/zstd-overlay/zstd-overlay > /tmp/zstd-overlay
+git -C /home/user/playground fetch origin main   # or the branch the new version is on
+git -C /home/user/playground archive origin/main projects/zstd-overlay/zstd-overlay | tar -xOf - projects/zstd-overlay/zstd-overlay > /tmp/zstd-overlay
 python3 /tmp/zstd-overlay install && zstd-overlay up && zstd-overlay doctor
 ```
 

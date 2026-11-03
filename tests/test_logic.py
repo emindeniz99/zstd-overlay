@@ -770,3 +770,18 @@ def test_flags_may_follow_the_folders(monkeypatch):
 def test_direct_io_on_something_that_is_not_a_loop_device_reports_false():
     # A refusal is reported, not raised: the image works without it, only cached twice.
     assert zo.loop_direct_io("/dev/null") is False
+
+
+def test_version_names_the_commit_and_its_date_when_built_with_git_archive():
+    line = zo.version_line("3d898f0 2026-11-03T15:30:00+00:00")
+    assert line.endswith("(commit 3d898f0, 2026-11-03T15:30:00+00:00)")
+    assert line.startswith(f"zstd-overlay {zo.self_hash()} ")
+
+
+def test_version_says_so_when_the_placeholder_was_not_filled_in(capsys):
+    # A checkout, or a file copied out with `git show`, keeps the placeholder: say so instead of
+    # printing it, so nobody reads "$Format" as a commit.
+    assert zo.main(["version"]) == 0
+    out = capsys.readouterr().out
+    assert "working copy" in out
+    assert "$Format" not in out
