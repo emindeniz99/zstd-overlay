@@ -540,6 +540,29 @@ class Session:
         upper = self.upper(path)
         return [p for p in changed if hidden_by_upper(os.path.relpath(p, path), upper)]
 
+    def write_back_startup_files(self, path: str) -> None:
+        """Claude Code read each repository's CLAUDE.md, .claude/ and .mcp.json from the normal
+        disk when it started, a few seconds ago, before this hook. Move the image's newer
+        versions of them down to the normal disk, so the next start reads them, and tell Claude
+        that this start read the older ones."""
+        upper = self.upper(path)
+        roots = {os.path.dirname(g) for g in git_dirs(path)}
+        if self.cfg.project and inside(os.path.realpath(self.cfg.project), path):
+            roots.add(os.path.realpath(self.cfg.project))
+        written = []
+        for root in sorted(roots):
+            rel_root = os.path.relpath(root, path)
+            rels = [os.path.normpath(os.path.join(rel_root, f)) for f in STARTUP_FILES]
+            written += [os.path.join(path, r) for r in write_back(upper, path, rels)]
+        if written:
+            shown = ", ".join(written[:6]) + (", ..." if len(written) > 6 else "")
+            self.say(f"wrote {len(written)} startup files back to the normal disk: {shown}")
+            self.say(
+                "  note for Claude: Claude Code loaded the older copies of these at this start. "
+                "Read CLAUDE.md again now; changes to .claude/ settings, hooks, skills and .mcp.json "
+                "take effect at the next start."
+            )
+
     def move_git_out(self, path: str) -> None:
         """Move each .git found in the image to the normal disk. Versions before 3d7ad8d+1 kept
         .git in the image; a repository cloned while mounted has its .git there too. Called
@@ -630,6 +653,8 @@ class Session:
                 self.say(f"    ... and {len(hidden) - 20} more")
             self.say(f"  it stays on the normal disk. Keep those changes: zstd-overlay up --merge {path}")
             return False
+        if repos:
+            self.write_back_startup_files(path)
         aside = None
         if hidden:  # --merge: set the normal disk's files aside, mount, put them back on top
             aside = tempfile.mkdtemp(dir=cfg.mnt, prefix="merge.")
@@ -905,6 +930,43 @@ def absorb(lower: str, upper: str, mounted_ns: int | None = None) -> tuple[int, 
             with contextlib.suppress(OSError):
                 os.rmdir(os.path.join(root, d))
     return moved, size
+
+
+# What Claude Code reads from a repository when it starts, before the SessionStart hook mounts
+# anything. These live on the normal disk, so a start after a resume reads the current ones.
+STARTUP_FILES = ("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", ".mcp.json", ".claude")
+
+
+def write_back(upper: str, lower: str, rels: list[str]) -> list[str]:
+    """Move the image's versions of `rels` (files or folders, relative to the folder) down to
+    the normal disk and out of the image: a file replaces the normal disk's, a deletion marker
+    deletes it. Called while the folder is not mounted. Returns the paths written back."""
+    done = []
+    for rel in rels:
+        top = os.path.join(upper, rel)
+        if not os.path.lexists(top):
+            continue
+        for root, dirs, files in (
+            os.walk(top)
+            if os.path.isdir(top) and not os.path.islink(top)
+            else [(os.path.dirname(top), [], [os.path.basename(top)])]
+        ):
+            dst_root = os.path.join(lower, os.path.relpath(root, upper))
+            for name in [d for d in dirs if os.path.islink(os.path.join(root, d))] + files:
+                src, dst = os.path.join(root, name), os.path.join(dst_root, name)
+                if os.path.isdir(dst) and not os.path.islink(dst):
+                    shutil.rmtree(dst)
+                elif os.path.lexists(dst):
+                    os.unlink(dst)
+                if not is_whiteout(os.lstat(src)):
+                    os.makedirs(dst_root, exist_ok=True)
+                    copy_entry(src, dst)
+                done.append(os.path.relpath(dst, lower))
+        if os.path.isdir(top) and not os.path.islink(top):
+            shutil.rmtree(top)
+        else:
+            os.unlink(top)
+    return done
 
 
 def newer_than_upper(lower: str, upper: str) -> bool:

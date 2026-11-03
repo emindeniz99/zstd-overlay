@@ -522,11 +522,42 @@ s19() {
   done_scenario
 }
 
+s20() {
+  scenario 20 "CLAUDE.md, .claude/ and .mcp.json go back to the normal disk for the next start"
+  start s20
+  local below='mkdir -p /tmp/r && mount --bind / /tmp/r && cat /tmp/r/work/repo/CLAUDE.md; umount /tmp/r'
+  xs "printf 'as cloned\n' > /work/repo/CLAUDE.md && $ZO up"
+  # The session edits its instructions, its settings and some code; then the VM pauses.
+  xs 'echo "edited in the session" > /work/repo/CLAUDE.md && mkdir -p /work/repo/.claude && echo "{\"x\":1}" > /work/repo/.claude/settings.json && echo code > /work/repo/src.py'
+  restart
+  check "before the hook, Claude Code would read the clone's CLAUDE.md" eq "$(x 'cat /work/repo/CLAUDE.md')" "as cloned"
+  local out; out=$(x "$ZO up --hook; echo exit=\$?")
+  check "up exits 0, nothing refused" eq "$(printf '%s\n' "$out" | grep -c 'not compressed'):$(printf '%s\n' "$out" | tail -1)" "0:exit=0"
+  check "it wrote both files back" has "$out" "wrote 2 startup files back to the normal disk"
+  check "and tells Claude to read CLAUDE.md again" has "$out" "Read CLAUDE.md again now"
+  check "the normal disk now has the session's CLAUDE.md" eq "$(x "$below")" "edited in the session"
+  check "and its .claude/settings.json" eq "$(x 'mkdir -p /tmp/r && mount --bind / /tmp/r && cat /tmp/r/work/repo/.claude/settings.json; umount /tmp/r')" '{"x":1}'
+  check "the image holds neither any more" eq "$(x 'ls /mnt/zstd-overlay/upper/%work/repo/CLAUDE.md /mnt/zstd-overlay/upper/%work/repo/.claude 2>/dev/null | wc -l')" 0
+  check "code stays in the image" eq "$(x 'cat /mnt/zstd-overlay/upper/%work/repo/src.py')" "code"
+  check "the mounted view shows all three" eq "$(x 'cat /work/repo/CLAUDE.md /work/repo/src.py')" $'edited in the session\ncode'
+  restart
+  check "after the next restart, the start reads the current CLAUDE.md" eq "$(x 'cat /work/repo/CLAUDE.md')" "edited in the session"
+  out=$(x "$ZO up --hook")
+  check "and nothing is written back again" eq "$(printf '%s\n' "$out" | grep -c 'startup files')" 0
+  # Still strict: the session edits CLAUDE.md again, and the normal disk's copy changes too.
+  xs 'echo "second edit" > /work/repo/CLAUDE.md'
+  restart
+  xs 'echo "edited outside" > /work/repo/CLAUDE.md'
+  out=$(x "$ZO up; echo exit=\$?")
+  check "a real conflict on CLAUDE.md still refuses the repository folder" has "$out" "NOT MOUNTED: /work changed"
+  done_scenario
+}
+
 # --- main ------------------------------------------------------------------------
 
 [ "$(id -u)" = 0 ] || { echo "run as root (privileged containers)"; exit 2; }
 build_images || { echo "could not build the test images; see $LOG"; exit 2; }
-want=("$@"); [ ${#want[@]} -gt 0 ] || want=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19)
+want=("$@"); [ ${#want[@]} -gt 0 ] || want=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20)
 for n in "${want[@]}"; do "s$n"; done
 echo; echo "== $PASS passed, $FAIL failed, $SKIP skipped (log: $LOG)"; printf '   %s\n' "${RESULTS[@]}"
 [ "$FAIL" = 0 ]

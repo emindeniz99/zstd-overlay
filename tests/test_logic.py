@@ -506,3 +506,44 @@ def test_absorb_drops_a_leftover_the_image_had_superseded(tmp_path):
     assert (upper / "index" / "only-below").read_text() == "no version in the image"
     assert (upper / "index" / "fresh.log").read_text() == "written after the mount"
     assert list(lower.iterdir()) == []  # nothing left below the mount, the leftover included
+
+
+# --- the files Claude Code reads before the hook ----------------------------------------------
+
+
+def test_write_back_moves_startup_files_to_the_normal_disk(tmp_path):
+    # Claude Code reads CLAUDE.md, .claude/ and .mcp.json before the hook mounts: the session's
+    # edits to them must be on the normal disk for the next start, and out of the image.
+    upper, lower = tmp_path / "upper", tmp_path / "lower"
+    (upper / "repo" / ".claude" / "rules").mkdir(parents=True)
+    (lower / "repo" / ".claude").mkdir(parents=True)
+    (upper / "repo" / "CLAUDE.md").write_text("edited in the session")
+    (lower / "repo" / "CLAUDE.md").write_text("as cloned")
+    (upper / "repo" / ".claude" / "rules" / "new.md").write_text("a new rule")
+    (upper / "repo" / "src.py").write_text("code stays in the image")
+    rels = [f"repo/{f}" for f in zo.STARTUP_FILES]
+    done = zo.write_back(str(upper), str(lower), rels)
+    assert sorted(done) == ["repo/.claude/rules/new.md", "repo/CLAUDE.md"]
+    assert (lower / "repo" / "CLAUDE.md").read_text() == "edited in the session"
+    assert (lower / "repo" / ".claude" / "rules" / "new.md").read_text() == "a new rule"
+    assert not (upper / "repo" / "CLAUDE.md").exists()
+    assert not (upper / "repo" / ".claude").exists()
+    assert (upper / "repo" / "src.py").exists()
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="mknod needs root")
+def test_write_back_applies_a_deleted_startup_file(tmp_path):
+    upper, lower = tmp_path / "upper", tmp_path / "lower"
+    upper.mkdir()
+    lower.mkdir()
+    (lower / ".mcp.json").write_text("{}")
+    os.mknod(upper / ".mcp.json", 0o600 | stat.S_IFCHR, 0)  # the session deleted it
+    assert zo.write_back(str(upper), str(lower), [".mcp.json"]) == [".mcp.json"]
+    assert not (lower / ".mcp.json").exists()
+    assert not os.path.lexists(upper / ".mcp.json")
+
+
+def test_write_back_without_edits_does_nothing(tmp_path):
+    (tmp_path / "upper").mkdir()
+    (tmp_path / "lower").mkdir()
+    assert zo.write_back(str(tmp_path / "upper"), str(tmp_path / "lower"), ["CLAUDE.md", ".claude"]) == []

@@ -8,6 +8,8 @@
 
 ## Decisions
 
+- 2026-11-03: the repository stays in the image (writes compressed as they happen; a 5.3 GB build would not fit the 4 GB outside), but its startup files (CLAUDE.md, CLAUDE.local.md, AGENTS.md, .claude/, .mcp.json) are moved back to the normal disk at each mount, with a note telling Claude to re-read CLAUDE.md (owner chose the narrow fix over keeping the repository out of the image).
+
 - 2026-11-03: a cache folder stays empty on the normal disk: before each mount, everything there moves into the image (owner: "merging into a cache is silly"). Replaces the newer-wins merge and the one-time migration with its marker; what was written while unmounted is the newest by construction. The repository folder stays strict and keeps its files on the normal disk: Claude Code reads CLAUDE.md, .claude/ and .mcp.json there before the hook, and the platform writes .git.
 
 - 2026-11-03: a conflict is a file written while unmounted that the image also has a version of (it would be hidden); the repository folder refuses on one, the default home folders (caches) take the newer file. Each `.git` stays on the normal disk, bind-mounted: the platform rewrites every `.git/config` on resume, before any hook, so the old rule refused the repository folder on every resume (field report, reproduced as scenario 14).
