@@ -28,6 +28,7 @@ sys.modules["zstd_overlay"] = zo  # dataclasses on Python 3.11 look the module u
 _loader.exec_module(zo)
 
 MiB = zo.MiB
+GiB = zo.GiB
 
 
 @pytest.fixture
@@ -840,3 +841,110 @@ def test_a_deleted_startup_file_is_reported_as_deleted_not_written(tmp_path):
     assert "probe" not in wrote[0]
     assert len(deleted) == 1
     assert "probe.txt" in deleted[0]
+
+
+# --- what the hook tells Claude ------------------------------------------------------------
+
+
+def test_the_header_explains_the_image_in_a_few_lines():
+    # Field report: a fresh session saw only "compressed: ..." lines. The header must say what
+    # is compressed, how much room there is inside and outside, where .git is, and the --merge
+    # rule, every start, in a few lines.
+    lines = zo.hook_header("zstd-overlay abc (commit 1234567, 2026-11-03)", "/home/user",
+                           ["/home/user", "/root/.cache", "/root/.npm"], 2 * GiB, 20 * GiB, 4 * GiB)  # fmt: skip
+    text = "\n".join(lines)
+    assert len(lines) <= 6
+    assert lines[0].startswith("zstd-overlay abc (commit 1234567, 2026-11-03): /home/user and 2 home folders")
+    assert "2.0 GiB used on disk, 20.0 GiB free inside" in text
+    assert "only 4.0 GiB is free" in text
+    assert "/tmp" in text
+    assert ".git" in text
+    assert "zstd-overlay doctor" in text
+    assert "Never run `zstd-overlay up --merge` unless the user agreed" in text
+
+
+def test_the_header_says_when_the_repository_folder_or_the_image_is_not_mounted():
+    refused = zo.hook_header("v", "/home/user", ["/root/.cache"], GiB, GiB, GiB)
+    assert "/home/user is NOT compressed" in refused[0]
+    no_image = zo.hook_header("v", "/home/user", [], None, None, GiB)
+    assert "the image is not mounted" in no_image[0]
+
+
+def _hook_run(monkeypatch, capsys, up):
+    monkeypatch.setenv("CLAUDE_CODE_REMOTE", "true")
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/home/user/playground")
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    monkeypatch.setattr(zo, "locked", contextlib.nullcontext)
+    monkeypatch.setattr(zo.Session, "up", up)
+    mnt = zo.Config.from_env().mnt
+    monkeypatch.setattr(zo, "mount_at", lambda t: zo.Mount(t, "btrfs", "/dev/loop0", "rw") if t == mnt else None)
+    monkeypatch.setattr(zo, "our_overlays", lambda m, d: ["/home/user", "/root/.cache"])
+    monkeypatch.setattr(zo, "fs_used", lambda p: 3 * GiB)
+    monkeypatch.setattr(zo, "fs_avail", lambda p: 21 * GiB if p == mnt else 4 * GiB)
+    assert zo.main(["up", "--hook"]) == 0
+    return capsys.readouterr().out
+
+
+def test_a_clean_start_prints_the_header_with_live_numbers(monkeypatch, capsys):
+    out = _hook_run(monkeypatch, capsys, lambda self, dirs, merge=False: self.say("compressed: /root/.cache"))
+    lines = out.splitlines()
+    assert "/home/user and 1 home folders are compressed" in lines[0]
+    assert "3.0 GiB used on disk, 21.0 GiB free inside" in lines[0]
+    assert "only 4.0 GiB is free" in lines[1]
+    assert lines[-1] == "zstd-overlay: compressed: /root/.cache"  # the mount lines follow the header
+
+
+def test_a_refusal_carries_the_header_in_its_json(monkeypatch, capsys):
+    out = _hook_run(monkeypatch, capsys, lambda self, dirs, merge=False: self.refuse("NOT MOUNTED: /home/user"))
+    context = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+    assert context.index("home folders are compressed") < context.index("NOT MOUNTED")
+    assert "only 4.0 GiB is free" in context
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="mknod needs root")
+def test_the_note_names_what_to_read_now_and_what_waits_for_the_next_start(tmp_path):
+    # Field report: most instructions live in .claude/rules; an edited rule was
+    # written back, but the note named only CLAUDE.md and put the rule under "next start".
+    cfg = zo.Config(img=str(tmp_path / "disk.img"), mnt=str(tmp_path / "mnt"), reserve=0, home="/root",
+                    project=str(tmp_path / "lower" / "repo"))  # fmt: skip
+    lower, repo = tmp_path / "lower", tmp_path / "lower" / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".claude" / "rules").mkdir(parents=True)
+    (repo / ".claude" / "rules" / "old.md").write_text("a rule the session deleted")
+    upper = Path(zo.Session(cfg).upper(str(lower))) / "repo"
+    (upper / ".claude" / "rules").mkdir(parents=True)
+    (upper / ".claude" / "skills" / "s").mkdir(parents=True)
+    (upper / ".claude" / "rules" / "x.md").write_text("edited rule")
+    os.mknod(upper / ".claude" / "rules" / "old.md", 0o600 | stat.S_IFCHR, 0)
+    (upper / ".claude" / "rules" / "nested").mkdir()
+    (upper / ".claude" / "rules" / "nested" / "y.md").write_text("a rule one folder down")
+    (upper / ".claude" / "CLAUDE.md").write_text("instructions under .claude")
+    # Only the skill list (each SKILL.md's frontmatter) is loaded at start; the rest of a skill
+    # is read from the mount when it is used.
+    (upper / ".claude" / "skills" / "s" / "SKILL.md").write_text("skill")
+    (upper / ".claude" / "skills" / "s" / "helper.py").write_text("read when the skill runs")
+    (upper / ".mcp.json").write_text("{}")
+    s = zo.Session(cfg, quiet=True)
+    s.write_back_startup_files(str(lower))
+    now = next(line for line in s.lines if "read them again now" in line)
+    gone = next(line for line in s.lines if "disregard them" in line)
+    later = next(line for line in s.lines if "next start" in line)
+    assert f"{repo}/.claude/rules/x.md" in now
+    assert f"{repo}/.claude/rules/nested/y.md" in now
+    assert f"{repo}/.claude/CLAUDE.md" in now
+    assert "skills" not in now
+    assert ".mcp.json" not in now
+    assert f"{repo}/.claude/rules/old.md" in gone
+    assert f"{repo}/.mcp.json" in later
+    assert f"{repo}/.claude/skills/s/SKILL.md" in later
+    assert "rules" not in later
+    assert any(line.startswith("zstd-overlay: deleted 1 startup files") and "old.md" in line for line in s.lines)
+
+
+def test_startup_kind_follows_what_claude_code_loads_at_start():
+    for path in ("r/CLAUDE.md", "r/CLAUDE.local.md", "r/AGENTS.md", "r/.claude/CLAUDE.md", "r/.claude/rules/a/b.md"):
+        assert zo.startup_kind(path) == "read", path
+    for path in ("r/.mcp.json", "r/.claude/settings.json", "r/.claude/settings.local.json", "r/.claude/hooks/h.sh",
+                 "r/.claude/agents/a.md", "r/.claude/commands/c.md", "r/.claude/skills/s/SKILL.md",
+                 "r/.claude/rules/notes.txt"):  # fmt: skip
+        assert zo.startup_kind(path) == "restart", path
