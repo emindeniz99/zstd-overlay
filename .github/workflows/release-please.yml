@@ -27,7 +27,9 @@ jobs:
           manifest-file: .release-please-manifest.json
       - name: attach the setup scripts to the new release
         if: steps.release.outputs.release_created == 'true'
-        run: gh workflow run release.yml --ref "${TAG}"
+        # --repo: the job has no checkout, and gh needs one or this flag.
+        run: gh workflow run release.yml --repo "${REPO}" --ref "${TAG}"
         env:
           GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
           TAG: ${{ steps.release.outputs.tag_name }}
