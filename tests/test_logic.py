@@ -780,7 +780,7 @@ def test_direct_io_on_something_that_is_not_a_loop_device_reports_false():
 def test_version_names_the_commit_and_its_date_when_built_with_git_archive():
     line = zo.version_line("3d898f0c0ffee0000000000000000000000000000 1793719800")
     assert line.endswith("(commit 3d898f0, 2026-11-03T15:30:00Z)")
-    assert line.startswith(f"zstd-overlay {zo.self_hash()} ")
+    assert line.startswith(f"zstd-overlay {zo.VERSION} {zo.self_hash()} ")
 
 
 def test_version_says_so_when_the_placeholder_was_not_filled_in(capsys):

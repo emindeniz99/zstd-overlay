@@ -18,7 +18,7 @@ Usage:
   zstd-overlay install             copy to /usr/local/bin and add a SessionStart hook
   zstd-overlay status              disk use, capacity, mounted folders
   zstd-overlay doctor              what is mounted, what is not, and why
-  zstd-overlay version             this file's SHA-256 (12 hex digits), commit and date
+  zstd-overlay version             version, this file's SHA-256 (12 hex digits), commit, date
 
 Default list: the folder holding $CLAUDE_PROJECT_DIR (in a cloud session
 /home/user, so every repository, also one attached later, is covered; the
@@ -79,6 +79,7 @@ MIN_CAPACITY = 512 * MiB
 BTRFS_IOC_RESIZE = 0x50009403  # _IOW(0x94, 3, struct btrfs_ioctl_vol_args), 4096 bytes
 LOOP_SET_CAPACITY = 0x4C07
 LOOP_SET_DIRECT_IO = 0x4C08
+VERSION = "0.1.0"  # x-release-please-version
 # `git archive` fills this in (.gitattributes: export-subst); a checkout leaves it as is.
 # The full id and the commit time as plain seconds: GitHub's archive of a commit fills the
 # placeholder too, and the setup script checks that file's SHA-256 against one computed
@@ -1275,7 +1276,7 @@ def version_line(commit: str = COMMIT) -> str:
         sha, _, seconds = commit.partition(" ")
         date = datetime.fromtimestamp(int(seconds), UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         origin = f"commit {sha[:7]}, {date}"
-    return f"zstd-overlay {self_hash()} ({origin})"
+    return f"zstd-overlay {VERSION} {self_hash()} ({origin})"
 
 
 def copy_entry(src: str, dst: str) -> None:
