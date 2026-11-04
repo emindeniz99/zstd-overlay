@@ -795,7 +795,13 @@ class Session:
             # the image, and the folder below the mount stays empty: no conflicts, and no
             # reflink from the lower layer, which overlayfs refuses (EXDEV) and uv stops on.
             stamp = self.stamp(path)
-            n, size = absorb(path, upper, os.stat(stamp).st_mtime_ns if os.path.exists(stamp) else None)
+            mounted_ns = os.stat(stamp).st_mtime_ns if os.path.exists(stamp) else None
+            # The stamp is dated from before the absorb, not from after the mount: a file written
+            # in between (an MCP server, a hook running beside this one) sits below the mount with
+            # a ctime before the mount's, and the next absorb must move it in, not drop it as a
+            # leftover. Touched here, not after the mount, so the file's ctime is the later one.
+            Path(stamp).touch()
+            n, size = absorb(path, upper, mounted_ns)
             if n:
                 self.say(f"moved {n} files ({gib(size)}) from the normal disk into the image: {path}")
         hidden = self.hidden(path, repos)
@@ -842,10 +848,11 @@ class Session:
             if aside:
                 run("cp", "-a", f"{aside}/.", f"{path}/")
                 self.say(f"merged {len(hidden)} changed files into {path} (the normal disk's versions win)")
-            Path(self.stamp(path)).touch()
+            if repos:  # a cache's stamp was dated before the absorb
+                Path(self.stamp(path)).touch()
         except (Stop, OSError) as e:
-            # Back to the normal disk, so that "NOT MOUNTED" is true; the previous stamp stays,
-            # so the next start sees the same changed files.
+            # Back to the normal disk, so that "NOT MOUNTED" is true; the repositories' folder
+            # keeps its previous stamp, so the next start sees the same changed files.
             if mounted_here:
                 with contextlib.suppress(Stop):
                     run("umount", "-R", path)

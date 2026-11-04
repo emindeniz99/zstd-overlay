@@ -1041,3 +1041,35 @@ def test_a_failure_after_the_mount_unmounts_again_and_keeps_the_aside(tmp_path, 
     kept = next(line for line in s.lines if "kept at" in line)
     aside = kept.rsplit(" ", 1)[1]
     assert Path(aside, "repo", "CLAUDE.md").read_text() == "edited outside"
+
+
+# --- a write that lands while the hook runs -----------------------------------------------------
+
+
+def test_a_cache_write_between_the_absorb_and_the_mount_is_not_a_leftover(tmp_path, monkeypatch):
+    # Hooks run in parallel and MCP servers start beside them: a write to a cache between the
+    # absorb and the overlay mount sits below the mount with a ctime before the mount's. Dated
+    # from after the mount, the stamp made the next absorb take it for a leftover and drop it.
+    lower, upper_root, mnt = tmp_path / "cache", tmp_path / "mnt" / "upper", tmp_path / "mnt"
+    cfg = zo.Config(img=str(tmp_path / "disk.img"), mnt=str(mnt), reserve=0, home=str(tmp_path), project="")
+    lower.mkdir()
+    (mnt / "stamps").mkdir(parents=True)
+    upper_root.mkdir()
+    s = zo.Session(cfg, quiet=True)
+    upper = Path(s.upper(str(lower)))
+    upper.mkdir()
+    (upper / "index").write_text("the image's version")
+
+    def run(*cmd):
+        if cmd[:3] == ("mount", "-t", "overlay"):  # an MCP server writes while the mount goes up
+            _later()
+            (lower / "index").write_text("written during the hook")
+
+    monkeypatch.setattr(zo, "run", run)
+    monkeypatch.setattr(zo.Session, "stale_processes", lambda self, path, dev: None)
+    assert s.mount_dir(str(lower), cache=True)
+    stamp = os.stat(s.stamp(str(lower))).st_mtime_ns
+    assert stamp <= os.lstat(lower / "index").st_ctime_ns
+    zo.absorb(str(lower), str(upper), stamp)  # the next start
+    assert (upper / "index").read_text() == "written during the hook"
+    assert list(lower.iterdir()) == []
