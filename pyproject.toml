@@ -1,5 +1,7 @@
 [project]
 name = "zstd-overlay"
+# Not the release version: that is version.txt and the VERSION line in the tool, which
+# release-please bumps. This one stays put, because uv.lock records it.
 version = "0.1.0"
 description = "Transparent zstd compression for folders in a Claude Code cloud session"
 readme = "README.md"
