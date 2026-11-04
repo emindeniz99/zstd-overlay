@@ -567,6 +567,14 @@ s20() {
   xs 'echo "edited outside" > /work/repo/CLAUDE.md'
   out=$(x "$ZO up; echo exit=\$?")
   check "a real conflict on CLAUDE.md still refuses the repository folder" has "$out" "NOT MOUNTED: /work changed"
+  # --merge: the normal disk's version must win, also for a startup file (review finding: the
+  # write-back used to run first and replace it with the image's).
+  out=$(x "$ZO up --merge /work; echo exit=\$?")
+  check "--merge exits 0" has "$out" "exit=0"
+  check "the normal disk's CLAUDE.md wins the merge" eq "$(x 'cat /work/repo/CLAUDE.md')" "edited outside"
+  restart
+  xs "$ZO up --hook"
+  check "and is what the next start reads" eq "$(x 'cat /work/repo/CLAUDE.md')" "edited outside"
   done_scenario
 }
 
@@ -583,16 +591,21 @@ s21() {
   out=$(x '/usr/local/bin/zstd-overlay version')
   check "version names the commit and its date" has "$out" "(commit $(git -C "$PROJ" rev-parse --short HEAD), 20"
   check "and the hash the script's header names" has "$out" "$(sed -n 's/.*zstd-overlay version prints \([0-9a-f]*\)).*/\1/p' "$built")"
-  xs "$ZO up"
+  xs '/usr/local/bin/zstd-overlay up'   # the installed copy, not the source under /src
   check "the installed copy works: the default folders mount" eq "$(mounts)" 5
   stop
-  start s21b
-  head -c -3000 "$built" > "$HERE/.setup-script-cut.sh"
-  docker cp "$HERE/.setup-script-cut.sh" "$CT:/setup-script.sh" 2>>"$LOG"
-  out=$(x 'bash /setup-script.sh 2>&1; echo exit=$?')
-  check "a truncated paste exits non-zero" eq "$(printf '%s\n' "$out" | grep -c 'exit=0')" 0
-  check "and says it is cut short" has "$out" "cut short"
-  check "and installs nothing" eq "$(x 'ls /usr/local/bin/zstd-overlay /root/.claude/settings.json 2>/dev/null | wc -l')" 0
+  # Cut inside the heredoc, and cut after it (the install line missing): both must fail loudly.
+  local cut
+  for cut in "head -c -3000" "sed \$d"; do
+    start s21b
+    $cut "$built" > "$HERE/.setup-script-cut.sh"
+    docker cp "$HERE/.setup-script-cut.sh" "$CT:/setup-script.sh" 2>>"$LOG"
+    out=$(x 'bash /setup-script.sh 2>&1; echo exit=$?')
+    check "a paste cut short ($cut) exits non-zero" eq "$(printf '%s\n' "$out" | grep -c 'exit=0')" 0
+    check "and says it is cut short" has "$out" "cut short"
+    check "and installs nothing" eq "$(x 'ls /usr/local/bin/zstd-overlay /root/.claude/settings.json 2>/dev/null | wc -l')" 0
+    stop
+  done
   rm -f "$HERE/.setup-script.sh" "$HERE/.setup-script-cut.sh"
   done_scenario
 }
