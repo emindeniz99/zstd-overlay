@@ -778,7 +778,7 @@ def test_direct_io_on_something_that_is_not_a_loop_device_reports_false():
 
 
 def test_version_names_the_commit_and_its_date_when_built_with_git_archive():
-    line = zo.version_line("3d898f0 2026-11-03T15:30:00+00:00")
+    line = zo.version_line("3d898f0c0ffee0000000000000000000000000000 2026-11-03T15:30:00+00:00")
     assert line.endswith("(commit 3d898f0, 2026-11-03T15:30:00+00:00)")
     assert line.startswith(f"zstd-overlay {zo.self_hash()} ")
 

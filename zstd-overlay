@@ -80,7 +80,9 @@ BTRFS_IOC_RESIZE = 0x50009403  # _IOW(0x94, 3, struct btrfs_ioctl_vol_args), 409
 LOOP_SET_CAPACITY = 0x4C07
 LOOP_SET_DIRECT_IO = 0x4C08
 # `git archive` fills this in (.gitattributes: export-subst); a checkout leaves it as is.
-COMMIT = "$Format:%h %cI$"
+# The full id, not an abbreviation: GitHub's archive of a commit fills it in the same way,
+# so the file a setup script downloads from GitHub has the hash the builder computed.
+COMMIT = "$Format:%H %cI$"
 
 # Folders that must never be covered. `/usr/local/...` and `/opt/<tool>` are allowed.
 SYSTEM = {
@@ -1269,7 +1271,7 @@ def version_line(commit: str = COMMIT) -> str:
         origin = "working copy, not built with git archive"
     else:
         sha, _, date = commit.partition(" ")
-        origin = f"commit {sha}, {date}"
+        origin = f"commit {sha[:7]}, {date}"
     return f"zstd-overlay {self_hash()} ({origin})"
 
 
