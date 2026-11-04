@@ -3,3 +3,5 @@
 __pycache__/
 .coverage*
 tests/.setup-script*.sh
+.env
+.env.*

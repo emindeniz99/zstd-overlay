@@ -52,10 +52,10 @@ To change the reserve or the image's place, set `ZSTD_OVERLAY_RESERVE_MB` (and t
 Run `install` from the environment's setup script. This repository is private, so the setup script cannot download the file; paste it in. `build-setup-script.sh` writes the script for a commit:
 
 ```bash
-projects/zstd-overlay/build-setup-script.sh > setup-script.sh    # HEAD; or name a commit
+./build-setup-script.sh <commit> > setup-script.sh    # a commit that is on GitHub; --embed for an environment that cannot reach github.com
 ```
 
-The field holds about 64 KB and the plain tool passed it (64,282 bytes at `dee02d7`), so the script carries the code xz-compressed and base64-encoded, about 30 KB, and `python3`, which the tool needs anyway, decodes it. What can be read is in the header: the commit and its date, the SHA-256 of the decoded file (`zstd-overlay version` prints its start), and the tool's `--help` text; `git show <commit>:projects/zstd-overlay/zstd-overlay` shows the code, and `build-setup-script.sh <commit>` reproduces the script byte for byte, so a paste can be checked against the repository. Before it runs `install` the script checks the SHA-256, so an altered paste installs nothing, and an EXIT trap turns a paste cut short, inside the payload or after it, into exit 1 with a message, so the platform reports a failed setup (scenario 21, which cuts the script in both places). The tool is taken with `git archive`, so that `zstd-overlay version` names the commit and its date. The readable form of 2026-11-03 (the tool in a heredoc) is in history up to `dee02d7`; the owner chose the compressed form on 2026-11-04 when it ran out of room, with a public repository as the next step, from which a setup script of a few lines can fetch a pinned commit.
+The script is a few lines: it downloads `zstd-overlay` at the named commit from this repository (GitHub's archive of the commit, which fills in the commit line as `git archive` does), checks the file's SHA-256 against the one in the script, and runs `install`. `zstd-overlay version` then names the commit and its date. An EXIT trap turns a paste cut short, anywhere, into exit 1 with a message, and a file that does not match the hash installs nothing, so the platform reports a failed setup either way (scenarios 21 and 22). For an environment that cannot reach github.com, `--embed` writes the tool itself into the script, xz-compressed and base64-encoded with a readable header, about 30 KB of the field's 64 KB; the plain file no longer fits, which is why the project left the monorepo it was written in.
 
 `zstd-overlay version` prints the installed file's hash, the commit and the commit date; `doctor` adds when the file was installed, which is when the environment cache was built or the session updated by hand. A file taken from a checkout with `git show` or `cp` carries no commit and says `working copy, not built with git archive`; its hash also differs from the built one by that line. That is expected for a file copied that way, not a defect; the manual-update commands below use `git archive` so a hand-updated session names its commit too.
 
@@ -66,9 +66,7 @@ Checked on 2026-11-03 in a new environment with this setup script: the snapshot 
 A session that is already running never sees a changed setup script: the script runs only when the environment cache is built, not on resume. Update such a session by hand, once:
 
 ```bash
-git -C /home/user/playground fetch origin main   # or the branch the new version is on
-git -C /home/user/playground archive origin/main projects/zstd-overlay/zstd-overlay | tar -xOf - projects/zstd-overlay/zstd-overlay > /tmp/zstd-overlay
-python3 /tmp/zstd-overlay install && zstd-overlay up && zstd-overlay doctor
+bash setup-script.sh && zstd-overlay up && zstd-overlay doctor   # the same script the environment got
 ```
 
 `up` folds the layer of any folder an earlier version mounted on its own (versions up to `dd94e60` mounted the repository, later ones the folder holding it) into the normal disk, newer file winning, so nothing written then stays hidden in the image.

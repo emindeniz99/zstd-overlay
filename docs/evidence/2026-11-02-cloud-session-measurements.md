@@ -1,5 +1,7 @@
 # Compression in a Claude Code cloud session, 2026-11-02
 
+Commit ids in this note name commits of the monorepo this project was written in (emindeniz99/playground, private) before its graduation; the extraction rewrote the ids, so they do not resolve here. The commits are the same ones, in the same order, in this repository's history.
+
 Measurements behind `zstd-overlay`'s design. The scripts and raw outputs are in
 [`2026-11-02-cloud-session-measurements/`](2026-11-02-cloud-session-measurements/), as run. They point `S=` at that
 session's scratch directory, and `aprv-measure.sh` calls the tool by its first name, `cloud-disk.sh`.
