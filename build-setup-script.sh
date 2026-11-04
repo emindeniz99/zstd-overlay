@@ -35,10 +35,13 @@ hash=$(printf '%s\n' "$tool" | sha256sum | cut -d' ' -f1)
 header="#!/bin/bash
 # Claude Code cloud environment setup script: installs zstd-overlay and its SessionStart hook.
 # It creates no image; the image appears at session start."
-trap_line="trap '[ \"\$reached_end\" = yes ] || { echo \"zstd-overlay: the setup script is cut short (the paste did not reach its last line); paste the whole script again\" >&2; exit 1; }' EXIT"
+# The file goes to a fresh temporary name, removed on every exit: a fixed path under /tmp could
+# be a symlink or a directory already, and the script runs as root.
+trap_line="trap '[ -n \"\${tool:-}\" ] && rm -f \"\$tool\"; [ \"\$reached_end\" = yes ] || { echo \"zstd-overlay: the setup script is cut short (the paste did not reach its last line); paste the whole script again\" >&2; exit 1; }' EXIT"
+tmp_line="tool=\$(mktemp /tmp/zstd-overlay.XXXXXX) || { reached_end=yes; exit 1; }"
 # The tool needs python3, and the trap must not blame a missing one on a cut paste.
 python_line="command -v python3 >/dev/null || { echo \"zstd-overlay: python3 is not installed; nothing installed\" >&2; reached_end=yes; exit 1; }"
-install_line="python3 /tmp/zstd-overlay install; rc=\$?; reached_end=yes; exit \$rc"
+install_line="python3 \"\$tool\" install; rc=\$?; reached_end=yes; exit \$rc"
 if [ "$mode" = fetch ]; then
   out=$(cat <<SCRIPT
 $header
@@ -49,9 +52,10 @@ $header
 reached_end=no
 $trap_line
 $python_line
-curl -fsSL "https://github.com/$REPO/archive/$full.tar.gz" | tar -xzOf - "zstd-overlay-$full/$path" > /tmp/zstd-overlay \\
+$tmp_line
+curl -fsSL "https://github.com/$REPO/archive/$full.tar.gz" | tar -xzOf - "zstd-overlay-$full/$path" > "\$tool" \\
   || { echo "zstd-overlay: could not download commit $sha from github.com/$REPO; nothing installed" >&2; reached_end=yes; exit 1; }
-echo "$hash  /tmp/zstd-overlay" | sha256sum -c --quiet || { echo "zstd-overlay: the downloaded file is not the one built from $sha; nothing installed" >&2; reached_end=yes; exit 1; }
+echo "$hash  \$tool" | sha256sum -c --quiet || { echo "zstd-overlay: the downloaded file is not the one built from $sha; nothing installed" >&2; reached_end=yes; exit 1; }
 $install_line
 SCRIPT
 )
@@ -75,7 +79,8 @@ $help
 reached_end=no
 $trap_line
 $python_line
-python3 - <<'ZSTD_OVERLAY_PY' || { [ \$? = 3 ] && reached_end=yes; exit 1; }  # 3: the hash or decode check; else a cut
+$tmp_line
+ZSTD_OVERLAY_FILE="\$tool" python3 - <<'ZSTD_OVERLAY_PY' || { [ \$? = 3 ] && reached_end=yes; exit 1; }  # 3: the hash or decode check; else a cut
 import base64, hashlib, lzma, os, sys
 PAYLOAD = """
 $payload
@@ -88,9 +93,8 @@ except Exception as e:
 if hashlib.sha256(tool).hexdigest() != "$hash":
     print("zstd-overlay: the decoded file's SHA-256 is not $hash; the paste is altered. Nothing installed.", file=sys.stderr)
     sys.exit(3)
-with open("/tmp/zstd-overlay", "wb") as f:
+with open(os.environ["ZSTD_OVERLAY_FILE"], "wb") as f:
     f.write(tool)
-os.chmod("/tmp/zstd-overlay", 0o755)
 ZSTD_OVERLAY_PY
 $install_line
 SCRIPT
