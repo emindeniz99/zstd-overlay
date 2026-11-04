@@ -36,6 +36,8 @@ header="#!/bin/bash
 # Claude Code cloud environment setup script: installs zstd-overlay and its SessionStart hook.
 # It creates no image; the image appears at session start."
 trap_line="trap '[ \"\$reached_end\" = yes ] || { echo \"zstd-overlay: the setup script is cut short (the paste did not reach its last line); paste the whole script again\" >&2; exit 1; }' EXIT"
+# The tool needs python3, and the trap must not blame a missing one on a cut paste.
+python_line="command -v python3 >/dev/null || { echo \"zstd-overlay: python3 is not installed; nothing installed\" >&2; reached_end=yes; exit 1; }"
 install_line="python3 /tmp/zstd-overlay install; rc=\$?; reached_end=yes; exit \$rc"
 if [ "$mode" = fetch ]; then
   out=$(cat <<SCRIPT
@@ -46,6 +48,7 @@ $header
 # Built by build-setup-script.sh in that repository; the same commit gives the same script.
 reached_end=no
 $trap_line
+$python_line
 curl -fsSL "https://github.com/$REPO/archive/$full.tar.gz" | tar -xzOf - "zstd-overlay-$full/$path" > /tmp/zstd-overlay \\
   || { echo "zstd-overlay: could not download commit $sha from github.com/$REPO; nothing installed" >&2; reached_end=yes; exit 1; }
 echo "$hash  /tmp/zstd-overlay" | sha256sum -c --quiet || { echo "zstd-overlay: the downloaded file is not the one built from $sha; nothing installed" >&2; reached_end=yes; exit 1; }
@@ -71,12 +74,17 @@ $header
 $help
 reached_end=no
 $trap_line
-python3 - <<'ZSTD_OVERLAY_PY' || { [ \$? = 3 ] && reached_end=yes; exit 1; }  # 3: the hash check; else a cut
+$python_line
+python3 - <<'ZSTD_OVERLAY_PY' || { [ \$? = 3 ] && reached_end=yes; exit 1; }  # 3: the hash or decode check; else a cut
 import base64, hashlib, lzma, os, sys
 PAYLOAD = """
 $payload
 """
-tool = lzma.decompress(base64.b64decode(PAYLOAD))
+try:
+    tool = lzma.decompress(base64.b64decode(PAYLOAD))
+except Exception as e:
+    print(f"zstd-overlay: the payload does not decode ({e}); the paste is altered. Nothing installed.", file=sys.stderr)
+    sys.exit(3)
 if hashlib.sha256(tool).hexdigest() != "$hash":
     print("zstd-overlay: the decoded file's SHA-256 is not $hash; the paste is altered. Nothing installed.", file=sys.stderr)
     sys.exit(3)

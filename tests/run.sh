@@ -606,6 +606,12 @@ s21() {
     check "and installs nothing" eq "$(x 'ls /usr/local/bin/zstd-overlay /root/.claude/settings.json 2>/dev/null | wc -l')" 0
     stop
   done
+  # No python3: the script must say so, not call the paste cut short.
+  start s21c "$BARE"
+  docker cp "$built" "$CT:/setup-script.sh" 2>>"$LOG"
+  out=$(x 'bash /setup-script.sh 2>&1; echo exit=$?')
+  check "without python3: names python3, exits non-zero" eq "$(printf '%s\n' "$out" | grep -c 'python3 is not installed'):$(printf '%s\n' "$out" | grep -c 'exit=0')" "1:0"
+  check "and does not call the paste cut short" eq "$(printf '%s\n' "$out" | grep -c 'cut short')" 0
   rm -f "$HERE/.setup-script.sh" "$HERE/.setup-script-cut.sh"
   done_scenario
 }
