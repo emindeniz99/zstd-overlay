@@ -583,7 +583,7 @@ s21() {
   local built="$HERE/.setup-script.sh"
   if ! "$PROJ/build-setup-script.sh" HEAD > "$built" 2>>"$LOG"; then echo "    SKIP  build-setup-script.sh failed (see log)"; SCN_SKIP=1; CT=""; done_scenario; return; fi
   start s21
-  check "the built script fits the paste field (under 64 KiB)" lt "$(wc -c < "$built")" 65536
+  check "the built script is well under the paste field (under 40 KB of 64)" lt "$(wc -c < "$built")" 40960
   docker cp "$built" "$CT:/setup-script.sh" 2>>"$LOG"
   local out; out=$(x 'bash /setup-script.sh; echo exit=$?')
   check "the setup script runs install" has "$out" "installed /usr/local/bin/zstd-overlay"
