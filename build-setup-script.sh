@@ -26,10 +26,10 @@ mode=fetch
 commit=${1:-HEAD}
 repo=$(git -C "$here" rev-parse --show-toplevel)
 path=$(realpath --relative-to="$repo" "$here/zstd-overlay")
-full=$(git -C "$repo" rev-parse "$commit")
+full=$(git -C "$repo" rev-parse --verify "$commit^{commit}")  # ^{commit}: a tag names its commit, not the tag object
 sha=${full:0:7}
-date=$(git -C "$repo" log -1 --format=%cI "$commit")
-tool=$(git -C "$repo" archive "$commit" "$path" | tar -xOf - "$path")
+date=$(git -C "$repo" log -1 --format=%cI "$full")
+tool=$(git -C "$repo" archive "$full" "$path" | tar -xOf - "$path")
 grep -q '^COMMIT = "\$Format' <<<"$tool" && { echo "git archive did not fill in the commit (is .gitattributes committed?)" >&2; exit 1; }
 hash=$(printf '%s\n' "$tool" | sha256sum | cut -d' ' -f1)
 header="#!/bin/bash
