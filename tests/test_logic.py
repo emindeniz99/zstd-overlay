@@ -762,6 +762,41 @@ def test_the_hook_reports_an_error_with_exit_0(monkeypatch, capsys):
     assert "folder(s)" not in out["systemMessage"]
 
 
+def test_the_hook_reports_an_unexpected_error_with_exit_0_too(monkeypatch, capsys):
+    # README, Safety: `up --hook` reports any error in its JSON with exit 0. A bug (not a Stop or
+    # an OSError) used to escape as a traceback with exit 1, which Claude Code shows nobody.
+    monkeypatch.setenv("CLAUDE_CODE_REMOTE", "true")
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    monkeypatch.setattr(zo, "locked", contextlib.nullcontext)
+
+    def boom(self, dirs, merge=False):
+        raise ValueError("a bug")
+
+    monkeypatch.setattr(zo.Session, "up", boom)
+    assert zo.main(["up", "--hook"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert "ValueError: a bug" in out["hookSpecificOutput"]["additionalContext"]
+    assert out["systemMessage"].startswith("zstd-overlay: stopped (ValueError: a bug)")
+    # Outside the hook a bug is still a traceback: nothing hides it.
+    monkeypatch.delenv("CLAUDE_CODE_REMOTE")
+    with pytest.raises(ValueError, match="a bug"):
+        zo.main(["up"])
+
+
+def test_a_reserve_that_is_not_a_number_is_reported_not_a_traceback(monkeypatch, capsys):
+    # The README tells the user to set ZSTD_OVERLAY_RESERVE_MB in the environment's variables;
+    # "4g" there made the hook die with a ValueError before it could report anything.
+    monkeypatch.setenv("ZSTD_OVERLAY_RESERVE_MB", "4g")
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    assert zo.main(["status"]) == 2
+    assert "ZSTD_OVERLAY_RESERVE_MB must be a whole number of MiB, not '4g'" in capsys.readouterr().err
+    monkeypatch.setenv("CLAUDE_CODE_REMOTE", "true")
+    assert zo.main(["up", "--hook"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert "ZSTD_OVERLAY_RESERVE_MB" in out["systemMessage"]
+    assert out["hookSpecificOutput"]["additionalContext"].startswith("zstd-overlay ")
+
+
 def test_flags_may_follow_the_folders(monkeypatch):
     monkeypatch.setattr(os, "geteuid", lambda: 0)
     monkeypatch.setattr(zo, "locked", contextlib.nullcontext)

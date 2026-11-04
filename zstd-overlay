@@ -122,10 +122,13 @@ class Config:
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> Config:
         env = dict(os.environ if env is None else env)
+        reserve = env.get("ZSTD_OVERLAY_RESERVE_MB", "4096")
+        if not reserve.isdigit():  # the environment's variables are typed by hand
+            raise Stop(f"ZSTD_OVERLAY_RESERVE_MB must be a whole number of MiB, not {reserve!r}")
         return cls(
             img=os.path.realpath(env.get("ZSTD_OVERLAY_IMG", "/var/lib/zstd-overlay/disk.img")),
             mnt=os.path.realpath(env.get("ZSTD_OVERLAY_MNT", "/mnt/zstd-overlay")),
-            reserve=int(env.get("ZSTD_OVERLAY_RESERVE_MB", "4096")) * MiB,
+            reserve=int(reserve) * MiB,
             home=env.get("HOME", "/root"),
             project=env.get("CLAUDE_PROJECT_DIR", ""),
         )
@@ -1325,7 +1328,14 @@ def main(argv: list[str] | None = None) -> int:
     if unknown := [a for a in args if a.startswith("-")]:
         print(f"zstd-overlay: unknown option: {unknown[0]} (see --help)", file=sys.stderr)
         return 2
-    s = Session(Config.from_env(), quiet=hook)
+    try:
+        s = Session(Config.from_env(), quiet=hook)
+    except Stop as e:  # a variable typed wrong in the environment's settings
+        if not hook:
+            print(f"zstd-overlay: {e}", file=sys.stderr)
+            return 2
+        print(hook_output([f"{version_line()}: stopped: {e}"], 0, str(e)))
+        return 0
     try:
         with locked():
             if cmd == "up":
@@ -1334,12 +1344,16 @@ def main(argv: list[str] | None = None) -> int:
                 s.migrate(args)
             else:
                 getattr(s, cmd)()
-    except (Stop, OSError) as e:
+    except Exception as e:
+        expected = isinstance(e, (Stop, OSError))
         if not hook:
+            if not expected:
+                raise
             print(f"zstd-overlay: {e}", file=sys.stderr)
             return 2
-        s.stopped = str(e)  # a hook's report reaches Claude only on exit 0
-        s.say(f"stopped: {e}")
+        # A hook's report reaches Claude only on exit 0: every error goes into it, a bug too.
+        s.stopped = str(e) if expected else f"{type(e).__name__}: {e}"
+        s.say(f"stopped: {s.stopped}")
     if hook:
         try:
             s.lines[:0] = s.header()
