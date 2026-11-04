@@ -9,8 +9,8 @@ on:
   workflow_dispatch:   # release-please dispatches it from main for the new tag
     inputs:
       tag:
-        description: "the release tag to build the scripts for (default: the ref it runs on)"
-        required: false
+        description: "the release tag (v*) to build the scripts for"
+        required: true
 
 permissions:
   contents: read
@@ -26,8 +26,11 @@ jobs:
         with:
           persist-credentials: false
       - name: resolve the tag and its commit
+        # The fetch runs without credentials (persist-credentials is off); it works because
+        # the repository is public.
         run: |
           TAG="${INPUT_TAG:-$REF_NAME}"
+          case "$TAG" in v*) ;; *) echo "not a release tag: '${TAG}' (pass tag=v...)" >&2; exit 1 ;; esac
           git fetch --depth=1 origin "refs/tags/${TAG}:refs/tags/${TAG}"
           COMMIT=$(git rev-list -n 1 "${TAG}")
           echo "TAG=${TAG}" >> "$GITHUB_ENV"
