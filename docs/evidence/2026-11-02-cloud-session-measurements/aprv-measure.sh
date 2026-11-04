@@ -2,7 +2,7 @@
 # Measure apple-purchase-receipt-verifier's full toolchain + build + test footprint
 # with every write going through cloud-disk.sh (btrfs zstd:3 under overlayfs).
 # Each step logs: status, seconds, real MiB on the image, uncompressed MiB stored.
-S=/tmp/claude-0/-home-user-playground/9834e68b-9fbd-5758-9f60-6a5d09bb01a3/scratchpad
+S=${ZO_SCRATCH:?set ZO_SCRATCH to a scratch folder with room for the images}
 R=/home/user/apple-purchase-receipt-verifier
 OUT=$R/.out
 LOG=$S/aprv.log

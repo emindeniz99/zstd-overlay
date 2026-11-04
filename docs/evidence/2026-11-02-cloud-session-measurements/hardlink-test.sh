@@ -1,7 +1,7 @@
 #!/bin/bash
 # Do pnpm (store -> node_modules) and uv (cache -> .venv) keep their hardlinks under cloud-disk.sh?
 # A: cache and project on SEPARATE overlays.  B: one overlay holding both (XDG dirs moved under it).
-S=/tmp/claude-0/-home-user-playground/9834e68b-9fbd-5758-9f60-6a5d09bb01a3/scratchpad
+S=${ZO_SCRATCH:?set ZO_SCRATCH to a scratch folder with room for the images}
 CD=$S/cd/cloud-disk.sh
 SRC=/home/user/playground/projects
 U=/mnt/cloud-disk/upper

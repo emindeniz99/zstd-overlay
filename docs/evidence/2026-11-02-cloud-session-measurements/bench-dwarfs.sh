@@ -1,6 +1,6 @@
 #!/bin/bash
 # DwarFS (FUSE, user space): dedup across files + its own choice of algorithms.
-S=/tmp/claude-0/-home-user-playground/9834e68b-9fbd-5758-9f60-6a5d09bb01a3/scratchpad
+S=${ZO_SCRATCH:?set ZO_SCRATCH to a scratch folder with room for the images}
 DW=$S/dwarfs-dl/dwarfs-universal-0.15.8-Linux-x86_64; chmod +x $DW
 IMG=$S/d.dwarfs; MNT=$S/m; mkdir -p $MNT
 declare -A DATA=([node_modules]=$S/data/ai-date [toolchain_rustup]=/root/.rustup)

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Fair read test: every format, ext4 included, lives in a freshly written image file.
 # Columns: dataset fs algo MiB coldTar(s, median of 3) warmTar(s) coldTsc(s) warmTsc(s)
-S=/tmp/claude-0/-home-user-playground/9834e68b-9fbd-5758-9f60-6a5d09bb01a3/scratchpad
+S=${ZO_SCRATCH:?set ZO_SCRATCH to a scratch folder with room for the images}
 DW=$S/dwarfs-dl/dwarfs-universal-0.15.8-Linux-x86_64
 IMG=$S/r.img; MNT=$S/m; mkdir -p $MNT
 declare -A DATA=([node_project]=$S/data/ai-date [rust_target]=$S/rproj/target)

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Compare compressed filesystems available in this kernel.
 # Output: dataset, fs, algo, MiB on the ext4 host disk, build s, cold read s
-S=/tmp/claude-0/-home-user-playground/9834e68b-9fbd-5758-9f60-6a5d09bb01a3/scratchpad
+S=${ZO_SCRATCH:?set ZO_SCRATCH to a scratch folder with room for the images}
 IMG=$S/b.img; MNT=$S/m; mkdir -p $MNT
 declare -A DATA=([node_modules]=$S/data/ai-date [toolchain_rustup]=/root/.rustup)
 
