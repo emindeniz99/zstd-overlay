@@ -55,7 +55,7 @@ Run `install` from the environment's setup script. This repository is private, s
 ./build-setup-script.sh <commit> > setup-script.sh    # a commit that is on GitHub; --embed for an environment that cannot reach github.com
 ```
 
-Each release on GitHub carries the two scripts built for its commit (`setup-script.sh`, `setup-script-embedded.sh`) and their checksums, so there is nothing to build: paste the release's `setup-script.sh`.
+Each release on GitHub carries the two scripts built for its commit (`setup-script.sh`, `setup-script-embedded.sh`) and their checksums, so there is nothing to build: paste the release's `setup-script.sh`. Releases come from release-please: every push to `main` keeps one release PR open with the version and the changelog from the Conventional Commits, and merging it creates the tag and the release, to which the release workflow then attaches the scripts. `zstd-overlay version` prints the version, the file's hash, the commit and its date.
 
 ```bash
 ```

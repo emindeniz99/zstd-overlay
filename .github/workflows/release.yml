@@ -6,6 +6,7 @@ name: release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:   # release-please dispatches it with the new tag as the ref
 
 permissions:
   contents: read

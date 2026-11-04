@@ -1,0 +1,33 @@
+name: release-please
+
+# Keeps one release PR open from the Conventional Commits on main (version.txt,
+# the tool's VERSION line, CHANGELOG.md). Merging it creates the tag and the
+# GitHub Release; this job then dispatches release.yml for that tag, because a
+# tag made with the workflow token does not trigger workflows by itself.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    steps:
+      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+      - name: attach the setup scripts to the new release
+        if: steps.release.outputs.release_created == 'true'
+        run: gh workflow run release.yml --ref "${TAG}"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag_name }}

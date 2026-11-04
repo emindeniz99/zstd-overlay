@@ -35,3 +35,7 @@ A behavior change comes with a test that fails without it. A measured finding go
 ## Privacy
 
 Nothing that identifies a user, a machine or an account goes into the repository: no session ids, hostnames or paths beyond the maintainer's own attribution, and no real repository content in fixtures.
+
+## Releases
+
+release-please keeps one release PR open from the Conventional Commits on `main`; merging it (merge commit, as always) creates the tag and the GitHub Release. Never edit `version.txt` and the `VERSION` line in `zstd-overlay` by hand: the release PR bumps them. A `fix` makes a patch release, a `feat` a minor one, a `!` or a `BREAKING CHANGE:` footer a major one; `docs`, `test`, `ci` and `chore` commits do not make a release on their own.

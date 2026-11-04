@@ -18,6 +18,10 @@ Read `MEMORY.md` before non-trivial work and record decisions and learnings ther
 - A measured finding goes into `docs/evidence/` with its script. A claim nobody can rerun is not evidence.
 - `build-setup-script.sh` is the only way to build the environment's setup script. Never hand-edit a built script.
 
+## Releases
+
+- release-please owns the version: never edit `version.txt` and the `VERSION` line in `zstd-overlay` by hand, and never create a tag or a release by hand; merge the release PR. Its commit types decide the bump, so a behavior change is a `feat` or a `fix`, never a `chore`.
+
 ## Privacy
 
 No session ids, hostnames, account names or paths that identify a user or a machine, in files, commit messages or notes. The maintainer's own attribution is the one exception.
