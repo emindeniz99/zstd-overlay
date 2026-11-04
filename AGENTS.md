@@ -24,4 +24,4 @@ Read `MEMORY.md` before non-trivial work and record decisions and learnings ther
 
 ## Privacy
 
-No session ids, hostnames, account names or paths that identify a user or a machine, in files, commit messages or notes. The maintainer's own attribution is the one exception.
+No session ids, hostnames, account names or paths that identify a user or a machine, in files, commit messages or notes. Two exceptions: the maintainer's own attribution, and the `Claude-Session:` trailer a Claude Code cloud session adds to its commits, which is that platform's attribution and names no person.
