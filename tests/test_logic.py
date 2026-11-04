@@ -757,6 +757,9 @@ def test_the_hook_reports_an_error_with_exit_0(monkeypatch, capsys):
     assert zo.main(["up", "--hook"]) == 0
     out = json.loads(capsys.readouterr().out)
     assert "losetup" in out["hookSpecificOutput"]["additionalContext"]
+    # A stop before any folder is not a refused folder: the user must not read "1 folder(s)".
+    assert out["systemMessage"].startswith("zstd-overlay: stopped (")
+    assert "folder(s)" not in out["systemMessage"]
 
 
 def test_flags_may_follow_the_folders(monkeypatch):
@@ -948,3 +951,58 @@ def test_startup_kind_follows_what_claude_code_loads_at_start():
                  "r/.claude/agents/a.md", "r/.claude/commands/c.md", "r/.claude/skills/s/SKILL.md",
                  "r/.claude/rules/notes.txt"):  # fmt: skip
         assert zo.startup_kind(path) == "restart", path
+
+
+# --- --merge and a failure after the mount ----------------------------------------------------
+
+
+def _conflict(tmp_path, monkeypatch, fail_on=None):
+    """A repository folder whose CLAUDE.md the normal disk and the image both changed; `mount`
+    and `cp` are recorded, not run. Returns (session, path, calls, aside_seen)."""
+    lower, repo, mnt = tmp_path / "lower", tmp_path / "lower" / "repo", tmp_path / "mnt"
+    cfg = zo.Config(img=str(tmp_path / "disk.img"), mnt=str(mnt), reserve=0, home="/root", project=str(repo))
+    repo.mkdir(parents=True)
+    (mnt / "stamps").mkdir(parents=True)
+    (repo / "CLAUDE.md").write_text("as cloned")
+    Path(zo.Session(cfg).stamp(str(lower))).touch()
+    _later()
+    (repo / "CLAUDE.md").write_text("edited outside")  # on the normal disk, while unmounted
+    upper = Path(zo.Session(cfg).upper(str(lower))) / "repo"
+    upper.mkdir(parents=True)
+    (upper / "CLAUDE.md").write_text("edited in the session")  # in the image
+    calls: list[tuple[str, ...]] = []
+    aside_seen: dict[str, str] = {}
+
+    def run(*cmd):
+        calls.append(cmd)
+        if cmd[0] == "cp":
+            aside_seen["CLAUDE.md"] = Path(cmd[2][:-2], "repo", "CLAUDE.md").read_text()
+        if cmd[0] == fail_on:
+            raise zo.Stop(f"{cmd[0]}: No space left on device")
+
+    monkeypatch.setattr(zo, "run", run)
+    return zo.Session(cfg, quiet=True), str(lower), calls, aside_seen
+
+
+def test_merge_puts_the_normal_disks_startup_file_on_top(tmp_path, monkeypatch):
+    # Review finding: the write-back ran before the aside copy, so the aside held the image's
+    # CLAUDE.md and the merge put that back on top; the normal disk's edit was lost.
+    s, path, calls, aside_seen = _conflict(tmp_path, monkeypatch)
+    assert s.mount_dir(path, merge=True)
+    assert aside_seen["CLAUDE.md"] == "edited outside"
+    assert [c[0] for c in calls] == ["mount", "cp"]
+
+
+def test_a_failure_after_the_mount_unmounts_again_and_keeps_the_aside(tmp_path, monkeypatch):
+    # Review finding: a failure after the overlay was mounted (the merge copy, the stamp) was
+    # reported as NOT MOUNTED while the folder stayed mounted, with no stamp for the next start.
+    s, path, calls, _ = _conflict(tmp_path, monkeypatch, fail_on="cp")
+    stamp = Path(s.stamp(path))
+    before = stamp.stat().st_mtime_ns
+    with pytest.raises(zo.Stop, match="back on the normal disk"):
+        s.mount_dir(path, merge=True)
+    assert ("umount", "-R", path) in calls
+    assert stamp.stat().st_mtime_ns == before  # the next start compares against the same stamp
+    kept = next(line for line in s.lines if "kept at" in line)
+    aside = kept.rsplit(" ", 1)[1]
+    assert Path(aside, "repo", "CLAUDE.md").read_text() == "edited outside"

@@ -421,22 +421,26 @@ def reread_note(written: list[str], deleted: list[str]) -> list[str]:
     return lines
 
 
-def hook_output(lines: list[str], refused: int) -> str:
+def hook_output(lines: list[str], refused: int, stopped: str | None = None) -> str:
     """What `up --hook` prints. Claude Code reads a SessionStart hook's stdout only on exit 0:
-    plain text becomes context for Claude; JSON can also warn the user."""
+    plain text becomes context for Claude; JSON can also warn the user. `stopped` is an error
+    that ended the run before or between folders (the lock, the image): not a refused folder."""
     text = "\n".join(lines)
-    if not refused:
+    if not refused and not stopped:
         return text
-    context = (
-        text + "\nSome folders were left on the normal disk, uncompressed, so that nothing is hidden. "
-        "Tell the user which ones and why. Run `zstd-overlay up --merge DIR` only after the user "
-        "has looked at the listed files and agreed."
-    )
+    if stopped:
+        context = text + f"\nzstd-overlay stopped: {stopped}. Tell the user; `zstd-overlay doctor` shows the state."
+        message = f"zstd-overlay: stopped ({stopped}); details: zstd-overlay doctor"
+    else:
+        context = (
+            text + "\nSome folders were left on the normal disk, uncompressed, so that nothing is hidden. "
+            "Tell the user which ones and why. Run `zstd-overlay up --merge DIR` only after the user "
+            "has looked at the listed files and agreed."
+        )
+        message = f"zstd-overlay: {refused} folder(s) not compressed this session; details: zstd-overlay doctor"
     return json.dumps(
         {
-            "systemMessage": (
-                f"zstd-overlay: {refused} folder(s) not compressed this session; details: zstd-overlay doctor"
-            ),
+            "systemMessage": message,
             "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": context},
         }
     )
@@ -532,6 +536,7 @@ def reserve_blocks(img: str, size: int) -> None:
 class Session:
     cfg: Config
     refused: int = 0
+    stopped: str | None = None
     lines: list[str] = field(default_factory=list)
     quiet: bool = False
 
@@ -794,8 +799,6 @@ class Session:
                 self.say(f"    ... and {len(hidden) - 20} more")
             self.say(f"  it stays on the normal disk. Keep those changes: zstd-overlay up --merge {path}")
             return False
-        if repos:
-            self.write_back_startup_files(path)
         aside = None
         if hidden:  # --merge: set the normal disk's files aside, mount, put them back on top
             aside = tempfile.mkdtemp(dir=cfg.mnt, prefix="merge.")
@@ -803,32 +806,50 @@ class Session:
                 rel = os.path.relpath(p, path)
                 os.makedirs(os.path.join(aside, os.path.dirname(rel)), exist_ok=True)
                 copy_entry(p, os.path.join(aside, rel))
+        # After the aside copy: the write-back replaces the normal disk's startup files with
+        # the image's, and with --merge the normal disk's versions must be the ones that win.
+        if repos:
+            self.write_back_startup_files(path)
         for d in ("upper", "work"):
             os.makedirs(os.path.join(cfg.mnt, d, key), exist_ok=True)
         # The repositories' .git stays on the normal disk: hold each one at a bind mount inside
         # the image while the overlay goes up, then bind it back over the same path.
         lower_dev = os.stat(path).st_dev
-        held = []
-        for g in git_dirs(path) if repos else []:
-            hold = os.path.join(cfg.mnt, "git", key_of(g))
-            os.makedirs(hold, exist_ok=True)
-            run("mount", "--bind", g, hold)
-            held.append((g, hold))
+        held: list[tuple[str, str]] = []
+        mounted_here = False
         try:
+            for g in git_dirs(path) if repos else []:
+                hold = os.path.join(cfg.mnt, "git", key_of(g))
+                os.makedirs(hold, exist_ok=True)
+                run("mount", "--bind", g, hold)
+                held.append((g, hold))
             run(
                 "mount", "-t", "overlay", "overlay", "-o",
                 f"lowerdir={path},upperdir={upper},workdir={cfg.mnt}/work/{key}", path,
             )  # fmt: skip
-        finally:
+            mounted_here = True
             for g, hold in held:
-                if mount_at(path) and os.path.isdir(g):
+                if os.path.isdir(g):
                     run("mount", "--bind", hold, g)
-                run("umount", hold)
+            if aside:
+                run("cp", "-a", f"{aside}/.", f"{path}/")
+                self.say(f"merged {len(hidden)} changed files into {path} (the normal disk's versions win)")
+            Path(self.stamp(path)).touch()
+        except (Stop, OSError) as e:
+            # Back to the normal disk, so that "NOT MOUNTED" is true; the previous stamp stays,
+            # so the next start sees the same changed files.
+            if mounted_here:
+                with contextlib.suppress(Stop):
+                    run("umount", "-R", path)
+            if aside:
+                self.say(f"  the normal disk's versions of the changed files are kept at {aside}")
+            raise Stop(f"{e}; {path} is back on the normal disk") from None
+        finally:
+            for _, hold in held:
+                with contextlib.suppress(Stop):
+                    run("umount", hold)
         if aside:
-            run("cp", "-a", f"{aside}/.", f"{path}/")
             shutil.rmtree(aside)
-            self.say(f"merged {len(hidden)} changed files into {path} (the normal disk's versions win)")
-        Path(self.stamp(path)).touch()
         if not quiet:
             self.say(f"compressed: {path}")
         self.stale_processes(path, lower_dev)
@@ -842,14 +863,15 @@ class Session:
         on 2026-11-02)."""
         names = []
         mine = ancestors(os.getpid())  # this process and the shell or hook runner that started it
-        # and the rest of its pipeline (`zstd-overlay up | tail`): same parent, same group. Not
-        # the whole group: a hook runs in Claude Code's group, with the MCP servers it started.
-        group, parent = os.getpgrp(), os.getppid()
+        # and the rest of its pipeline (`zstd-overlay up | tail`): same group, started by the
+        # same shell (one of our ancestors: `sudo zstd-overlay up | tail` has sudo in between).
+        # Not the whole group: a hook runs in Claude Code's group, with its MCP servers.
+        group = os.getpgrp()
         for pid in filter(str.isdigit, os.listdir("/proc")):
             if int(pid) in mine:
                 continue
             try:
-                if os.getpgid(int(pid)) == group and parent_of(int(pid)) == parent:
+                if os.getpgid(int(pid)) == group and parent_of(int(pid)) in mine:
                     continue
                 if os.readlink(f"/proc/{pid}/exe").endswith("/claude"):
                     continue
@@ -1049,7 +1071,8 @@ def absorb(lower: str, upper: str, mounted_ns: int | None = None) -> tuple[int, 
     dev = os.lstat(lower).st_dev
     linked: dict[tuple[int, int], str] = {}
     # Removing one name of a hard-linked file sets the inode's ctime to now: judge every name
-    # by the ctime the first one had.
+    # by the ctime the first one had (kept for hard-linked inodes only: a cache can hold a
+    # million files).
     ctimes: dict[tuple[int, int], int] = {}
     gone: set[str] = set()  # folders whose old contents the image hid (deleted or replaced)
     moved = size = 0
@@ -1077,15 +1100,13 @@ def absorb(lower: str, upper: str, mounted_ns: int | None = None) -> tuple[int, 
         for name in [d for d in dirs if os.path.islink(os.path.join(root, d))] + files:
             src, dst = os.path.join(root, name), os.path.join(dst_root, name)
             st = os.lstat(src)
-            ctime = ctimes.setdefault((st.st_dev, st.st_ino), st.st_ctime_ns)
+            ino = (st.st_dev, st.st_ino)  # nlink drops once a name is gone: also look the key up
+            ctime = ctimes.setdefault(ino, st.st_ctime_ns) if st.st_nlink > 1 or ino in ctimes else st.st_ctime_ns
             if mounted_ns is not None and ctime <= mounted_ns and (root in gone or os.path.lexists(dst)):
                 os.unlink(src)  # a leftover from before the last mount: the image's version is newer
                 continue
             ensure(root, dst_root)  # a new file in a folder the image had deleted brings it back
-            if real_dir(dst):
-                shutil.rmtree(dst)
-            elif os.path.lexists(dst):
-                os.unlink(dst)
+            remove(dst)
             # By inode alone: moving the first name already dropped this one's link count.
             if stat.S_ISREG(st.st_mode) and (st.st_dev, st.st_ino) in linked:
                 os.link(linked[(st.st_dev, st.st_ino)], dst)
@@ -1231,10 +1252,7 @@ def merge_tree(upper: str, lower: str) -> None:
                 if name == "config" and os.path.basename(root) == ".git" and os.path.isfile(dst):
                     merge_git_config(src, dst)
                 continue
-            if real_dir(dst):
-                shutil.rmtree(dst)
-            elif os.path.lexists(dst):
-                os.unlink(dst)
+            remove(dst)
             if not is_whiteout(os.lstat(src)):
                 copy_entry(src, dst)
         dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(root, d))]
@@ -1314,13 +1332,14 @@ def main(argv: list[str] | None = None) -> int:
         if not hook:
             print(f"zstd-overlay: {e}", file=sys.stderr)
             return 2
-        s.refuse(f"stopped: {e}")  # a hook's report reaches Claude only on exit 0
+        s.stopped = str(e)  # a hook's report reaches Claude only on exit 0
+        s.say(f"stopped: {e}")
     if hook:
         try:
             s.lines[:0] = s.header()
         except OSError as e:  # the report matters more than the header
             s.lines.insert(0, f"{version_line()}: could not read the disk's numbers ({e})")
-        print(hook_output(s.lines, s.refused))
+        print(hook_output(s.lines, s.refused, s.stopped))
         return 0
     return 3 if s.refused else 0
 
