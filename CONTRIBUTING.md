@@ -38,4 +38,4 @@ Nothing that identifies a user, a machine or an account goes into the repository
 
 ## Releases
 
-release-please keeps one release PR open from the Conventional Commits on `main`; merging it (merge commit, as always) creates the tag and the GitHub Release. Never edit `version.txt` and the `VERSION` line in `zstd-overlay` by hand: the release PR bumps them. A `fix` makes a patch release, a `feat` a minor one, a `!` or a `BREAKING CHANGE:` footer a major one; `docs`, `test`, `ci` and `chore` commits do not make a release on their own.
+release-please keeps one release PR open from the Conventional Commits on `main`; merging it (merge commit, as always) creates the tag and the GitHub Release. Never edit `version.txt` and the `VERSION` line in `zstd-overlay` by hand: the release PR bumps them. A `fix` makes a patch release, a `feat` a minor one, a `!` or a `BREAKING CHANGE:` footer a major one; `docs`, `test`, `ci` and `chore` commits do not make a release on their own. release-please reads the type, not the scope: a change to a workflow or to the tests is `ci` or `test` even when it fixes one, since `fix(ci)` cuts a release that ships nothing new.
