@@ -1,0 +1,45 @@
+name: release
+
+# A tag v* gets a GitHub Release with the environment's setup script for that
+# commit attached: the file to paste into a Claude Code cloud environment.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: build the setup script and publish the release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: build the setup scripts for this commit
+        run: |
+          ./build-setup-script.sh "${COMMIT}" > setup-script.sh
+          ./build-setup-script.sh --embed "${COMMIT}" > setup-script-embedded.sh
+          sha256sum setup-script.sh setup-script-embedded.sh > SHA256SUMS
+        env:
+          COMMIT: ${{ github.sha }}
+      - name: the download form really installs this commit
+        run: |
+          sudo bash setup-script.sh
+          sudo /usr/local/bin/zstd-overlay version | tee version.txt
+          grep -q "commit ${COMMIT:0:7}," version.txt
+        env:
+          COMMIT: ${{ github.sha }}
+      - name: publish the release
+        run: |
+          gh release create "${TAG}" setup-script.sh setup-script-embedded.sh SHA256SUMS \
+            --title "${TAG}" \
+            --notes "Paste \`setup-script.sh\` into a Claude Code cloud environment's setup script. It downloads \`zstd-overlay\` at commit ${COMMIT:0:7} and checks its SHA-256 before installing. \`setup-script-embedded.sh\` carries the tool itself, for an environment that cannot reach github.com."
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}

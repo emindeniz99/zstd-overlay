@@ -55,6 +55,11 @@ Run `install` from the environment's setup script. This repository is private, s
 ./build-setup-script.sh <commit> > setup-script.sh    # a commit that is on GitHub; --embed for an environment that cannot reach github.com
 ```
 
+Each release on GitHub carries the two scripts built for its commit (`setup-script.sh`, `setup-script-embedded.sh`) and their checksums, so there is nothing to build: paste the release's `setup-script.sh`.
+
+```bash
+```
+
 The script is a few lines: it downloads `zstd-overlay` at the named commit from this repository (GitHub's archive of the commit, which fills in the commit line as `git archive` does), checks the file's SHA-256 against the one in the script, and runs `install`. `zstd-overlay version` then names the commit and its date. An EXIT trap turns a paste cut short, anywhere, into exit 1 with a message, and a file that does not match the hash installs nothing, so the platform reports a failed setup either way (scenarios 21 and 22). For an environment that cannot reach github.com, `--embed` writes the tool itself into the script, xz-compressed and base64-encoded with a readable header, about 30 KB of the field's 64 KB; the plain file no longer fits, which is why the project left the monorepo it was written in.
 
 `zstd-overlay version` prints the installed file's hash, the commit and the commit date; `doctor` adds when the file was installed, which is when the environment cache was built or the session updated by hand. A file taken from a checkout with `git show` or `cp` carries no commit and says `working copy, not built with git archive`; its hash also differs from the built one by that line. That is expected for a file copied that way, not a defect; the manual-update commands below use `git archive` so a hand-updated session names its commit too.
