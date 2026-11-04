@@ -3,39 +3,62 @@
 # Paste the output into the environment's setup script (claude.ai/code, the
 # environment's settings).
 #
-#   projects/zstd-overlay/build-setup-script.sh [commit] > setup-script.sh
+#   build-setup-script.sh [commit]            a short script that downloads the tool at
+#                                             that commit from GitHub and checks its SHA-256
+#   build-setup-script.sh --embed [commit]    the tool itself, xz-compressed and base64-
+#                                             encoded, for an environment that cannot
+#                                             reach github.com (about 30 KB of the field's
+#                                             64 KB)
 #
-# The field holds 64 KB and the plain tool passed it (64,282 bytes at dee02d7), so
-# the code travels xz-compressed and base64-encoded, about 30 KB, and python3,
-# which the tool needs anyway, decodes it. What can be read is in the output's
-# header: the commit and its date, the SHA-256 of the decoded file (which
-# `zstd-overlay version` prints the start of), and the tool's --help text. The
-# script checks the SHA-256 before it runs `install`, so an altered paste installs
-# nothing, and an EXIT trap turns a paste cut short, anywhere, into exit 1 with a
-# message, so the platform reports a failed setup.
-#
-# The tool is taken with `git archive`, so `zstd-overlay version` names the commit
-# and its date; its hash is of that file, not of the checkout's. The output is
-# reproducible: the same commit gives the same bytes.
+# Both take the tool with `git archive`, so `zstd-overlay version` names the commit
+# and its date, and both check the file's SHA-256 before `install`. The download
+# is GitHub's archive of the commit, which fills in the commit line as git archive
+# does, so the bytes and the hash are the ones computed here; the commit must be
+# on GitHub. An EXIT trap turns a paste cut short, anywhere, into exit 1 with a
+# message, so the platform reports a failed setup. The output is reproducible:
+# the same commit gives the same script.
 set -euo pipefail
+REPO=emindeniz99/zstd-overlay
 LIMIT=65536
 here=$(cd "$(dirname "$0")" && pwd)
+mode=fetch
+[ "${1:-}" = --embed ] && { mode=embed; shift; }
 commit=${1:-HEAD}
 repo=$(git -C "$here" rev-parse --show-toplevel)
 path=$(realpath --relative-to="$repo" "$here/zstd-overlay")
-sha=$(git -C "$repo" rev-parse --short "$commit")
+full=$(git -C "$repo" rev-parse "$commit")
+sha=${full:0:7}
 date=$(git -C "$repo" log -1 --format=%cI "$commit")
 tool=$(git -C "$repo" archive "$commit" "$path" | tar -xOf - "$path")
 grep -q '^COMMIT = "\$Format' <<<"$tool" && { echo "git archive did not fill in the commit (is .gitattributes committed?)" >&2; exit 1; }
 hash=$(printf '%s\n' "$tool" | sha256sum | cut -d' ' -f1)
-payload=$(printf '%s\n' "$tool" | xz -9e --format=xz | base64 -w 76)
-# The module docstring, as a comment: from line 2 to the closing quotes.
-help=$(printf '%s\n' "$tool" | awk 'NR==2{sub(/^"""/,"")} NR>=2{if($0=="\"\"\"")exit; print "#   " $0}')
-out=$(cat <<SCRIPT
-#!/bin/bash
+header="#!/bin/bash
 # Claude Code cloud environment setup script: installs zstd-overlay and its SessionStart hook.
-# It creates no image; the image appears at session start.
-# Built from $path at $sha ($date) by build-setup-script.sh. The code is
+# It creates no image; the image appears at session start."
+trap_line="trap '[ \"\$reached_end\" = yes ] || { echo \"zstd-overlay: the setup script is cut short (the paste did not reach its last line); paste the whole script again\" >&2; exit 1; }' EXIT"
+install_line="python3 /tmp/zstd-overlay install; rc=\$?; reached_end=yes; exit \$rc"
+if [ "$mode" = fetch ]; then
+  out=$(cat <<SCRIPT
+$header
+# Downloads $path at commit $sha ($date) from github.com/$REPO, as GitHub's archive of
+# that commit, and checks its SHA-256 before install:
+#   $hash  (zstd-overlay version prints ${hash:0:12})
+# Built by build-setup-script.sh in that repository; the same commit gives the same script.
+reached_end=no
+$trap_line
+curl -fsSL "https://github.com/$REPO/archive/$full.tar.gz" | tar -xzOf - "zstd-overlay-$full/$path" > /tmp/zstd-overlay \\
+  || { echo "zstd-overlay: could not download commit $sha from github.com/$REPO; nothing installed" >&2; reached_end=yes; exit 1; }
+echo "$hash  /tmp/zstd-overlay" | sha256sum -c --quiet || { echo "zstd-overlay: the downloaded file is not the one built from $sha; nothing installed" >&2; reached_end=yes; exit 1; }
+$install_line
+SCRIPT
+)
+else
+  payload=$(printf '%s\n' "$tool" | xz -9e --format=xz | base64 -w 76)
+  # The module docstring, as a comment: from line 2 to the closing quotes.
+  help=$(printf '%s\n' "$tool" | awk 'NR==2{sub(/^"""/,"")} NR>=2{if($0=="\"\"\"")exit; print "#   " $0}')
+  out=$(cat <<SCRIPT
+$header
+# Built from $path at $sha ($date) by build-setup-script.sh --embed. The code is
 # xz-compressed and base64-encoded below (the field holds 64 KB; the plain file passed it).
 # python3 decodes it and checks its SHA-256 before install:
 #   $hash  (zstd-overlay version prints ${hash:0:12})
@@ -45,7 +68,7 @@ out=$(cat <<SCRIPT
 # What it does (the tool's --help):
 $help
 reached_end=no
-trap '[ "\$reached_end" = yes ] || { echo "zstd-overlay: the setup script is cut short (the paste did not reach its last line); paste the whole script again" >&2; exit 1; }' EXIT
+$trap_line
 python3 - <<'ZSTD_OVERLAY_PY' || { [ \$? = 3 ] && reached_end=yes; exit 1; }  # 3: the hash check; else a cut
 import base64, hashlib, lzma, os, sys
 PAYLOAD = """
@@ -59,10 +82,11 @@ with open("/tmp/zstd-overlay", "wb") as f:
     f.write(tool)
 os.chmod("/tmp/zstd-overlay", 0o755)
 ZSTD_OVERLAY_PY
-python3 /tmp/zstd-overlay install; rc=\$?; reached_end=yes; exit \$rc
+$install_line
 SCRIPT
 )
+fi
 size=$(printf '%s\n' "$out" | wc -c)  # bytes, as the field counts them
 [ "$size" -lt "$LIMIT" ] || { echo "the setup script is $size bytes, over the field's $LIMIT" >&2; exit 1; }
 printf '%s\n' "$out"
-echo "setup script: $size bytes, $((LIMIT - size)) under the field's $LIMIT" >&2
+echo "setup script ($mode): $size bytes" >&2

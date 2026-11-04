@@ -579,9 +579,9 @@ s20() {
 }
 
 s21() {
-  scenario 21 "the built setup script: installs from the paste, names the commit, refuses a truncated paste"
+  scenario 21 "the built setup script (--embed): installs from the paste, names the commit, refuses a truncated paste"
   local built="$HERE/.setup-script.sh"
-  if ! "$PROJ/build-setup-script.sh" HEAD > "$built" 2>>"$LOG"; then echo "    SKIP  build-setup-script.sh failed (see log)"; SCN_SKIP=1; CT=""; done_scenario; return; fi
+  if ! "$PROJ/build-setup-script.sh" --embed HEAD > "$built" 2>>"$LOG"; then echo "    SKIP  build-setup-script.sh failed (see log)"; SCN_SKIP=1; CT=""; done_scenario; return; fi
   start s21
   check "the built script is well under the paste field (under 40 KB of 64)" lt "$(wc -c < "$built")" 40960
   docker cp "$built" "$CT:/setup-script.sh" 2>>"$LOG"
@@ -610,11 +610,39 @@ s21() {
   done_scenario
 }
 
+s22() {
+  scenario 22 "the built setup script (download): fetches the pinned commit from GitHub and checks its hash"
+  # Needs a commit that is on GitHub: ZO_FETCH_COMMIT names it (CI passes the pushed one).
+  if [ -z "${ZO_FETCH_COMMIT:-}" ]; then echo "    SKIP  set ZO_FETCH_COMMIT to a commit that is on GitHub"; SCN_SKIP=1; CT=""; done_scenario; return; fi
+  local built="$HERE/.setup-script.sh"
+  if ! "$PROJ/build-setup-script.sh" "$ZO_FETCH_COMMIT" > "$built" 2>>"$LOG"; then echo "    SKIP  build-setup-script.sh failed (see log)"; SCN_SKIP=1; CT=""; done_scenario; return; fi
+  start s22
+  check "the script is short" lt "$(wc -c < "$built")" 2048
+  docker cp "$built" "$CT:/setup-script.sh" 2>>"$LOG"
+  local out; out=$(x 'bash /setup-script.sh 2>&1; echo exit=$?')
+  check "the setup script downloads and installs" has "$out" "installed /usr/local/bin/zstd-overlay"
+  check "and exits 0" has "$out" "exit=0"
+  out=$(x '/usr/local/bin/zstd-overlay version')
+  check "version names the pinned commit" has "$out" "(commit $(git -C "$PROJ" rev-parse --short=7 "$ZO_FETCH_COMMIT"), 20"
+  check "and the hash the script names" has "$out" "$(sed -n 's/.*zstd-overlay version prints \([0-9a-f]*\)).*/\1/p' "$built")"
+  xs '/usr/local/bin/zstd-overlay up'
+  check "the installed copy works: the default folders mount" eq "$(mounts)" 5
+  stop
+  start s22b
+  sed 's/^echo "[0-9a-f]*  /echo "0000000000000000000000000000000000000000000000000000000000000000  /' "$built" > "$HERE/.setup-script-cut.sh"
+  docker cp "$HERE/.setup-script-cut.sh" "$CT:/setup-script.sh" 2>>"$LOG"
+  out=$(x 'bash /setup-script.sh 2>&1; echo exit=$?')
+  check "a wrong hash in the script exits non-zero" eq "$(printf '%s\n' "$out" | grep -c 'exit=0')" 0
+  check "and installs nothing" eq "$(x 'ls /usr/local/bin/zstd-overlay 2>/dev/null | wc -l')" 0
+  rm -f "$HERE/.setup-script.sh" "$HERE/.setup-script-cut.sh"
+  done_scenario
+}
+
 # --- main ------------------------------------------------------------------------
 
 [ "$(id -u)" = 0 ] || { echo "run as root (privileged containers)"; exit 2; }
 build_images || { echo "could not build the test images; see $LOG"; exit 2; }
-want=("$@"); [ ${#want[@]} -gt 0 ] || want=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21)
+want=("$@"); [ ${#want[@]} -gt 0 ] || want=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22)
 for n in "${want[@]}"; do "s$n"; done
 echo; echo "== $PASS passed, $FAIL failed, $SKIP skipped (log: $LOG)"; printf '   %s\n' "${RESULTS[@]}"
 [ "$FAIL" = 0 ]
