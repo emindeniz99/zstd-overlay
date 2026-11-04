@@ -34,11 +34,15 @@ jobs:
           grep -q "commit ${COMMIT:0:7}," version.txt
         env:
           COMMIT: ${{ github.sha }}
-      - name: publish the release
+      - name: publish the release, or add the files to one made by hand
         run: |
-          gh release create "${TAG}" setup-script.sh setup-script-embedded.sh SHA256SUMS \
-            --title "${TAG}" \
-            --notes "Paste \`setup-script.sh\` into a Claude Code cloud environment's setup script. It downloads \`zstd-overlay\` at commit ${COMMIT:0:7} and checks its SHA-256 before installing. \`setup-script-embedded.sh\` carries the tool itself, for an environment that cannot reach github.com."
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" setup-script.sh setup-script-embedded.sh SHA256SUMS --clobber
+          else
+            gh release create "${TAG}" setup-script.sh setup-script-embedded.sh SHA256SUMS \
+              --title "${TAG}" \
+              --notes "Paste \`setup-script.sh\` into a Claude Code cloud environment's setup script. It downloads \`zstd-overlay\` at commit ${COMMIT:0:7} and checks its SHA-256 before installing. \`setup-script-embedded.sh\` carries the tool itself, for an environment that cannot reach github.com."
+          fi
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
