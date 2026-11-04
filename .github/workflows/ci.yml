@@ -1,0 +1,71 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: unit tests, lint, types
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13", "3.14", "3.15"]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: install uv
+        run: python3 -m pip install --user uv==0.13.5 && echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: sync
+        run: uv sync --locked --python "${PYTHON}"
+        env:
+          PYTHON: ${{ matrix.python }}
+      - name: format, lint, types
+        if: matrix.python == '3.15'
+        run: |
+          uv run ruff format --check
+          uv run ruff check
+          uv run ty check --error-on-warning
+      - name: unit tests
+        run: uv run --python "${PYTHON}" pytest -q
+        env:
+          PYTHON: ${{ matrix.python }}
+
+  scenarios:
+    name: Docker scenarios on the runner's kernel
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: kernel features
+        run: |
+          uname -r
+          grep -E 'btrfs|overlay' /proc/filesystems || sudo modprobe btrfs
+          grep -E 'btrfs|overlay' /proc/filesystems
+      - name: scenarios
+        run: sudo -E env ZO_FETCH_COMMIT="${COMMIT}" tests/run.sh
+        env:
+          COMMIT: ${{ github.sha }}
+      - name: log
+        if: always()
+        run: tail -200 tests/.last-run.log
+
+  zizmor:
+    name: workflow audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: install uv
+        run: python3 -m pip install --user uv==0.13.5 && echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: zizmor
+        run: uv tool run zizmor==1.32.0 --persona regular .github/workflows
