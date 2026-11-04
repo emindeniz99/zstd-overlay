@@ -6,7 +6,11 @@ name: release
 on:
   push:
     tags: ["v*"]
-  workflow_dispatch:   # release-please dispatches it with the new tag as the ref
+  workflow_dispatch:   # release-please dispatches it from main for the new tag
+    inputs:
+      tag:
+        description: "the release tag to build the scripts for (default: the ref it runs on)"
+        required: false
 
 permissions:
   contents: read
@@ -21,20 +25,27 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
-      - name: build the setup scripts for this commit
+      - name: resolve the tag and its commit
+        run: |
+          TAG="${INPUT_TAG:-$REF_NAME}"
+          git fetch --depth=1 origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          COMMIT=$(git rev-list -n 1 "${TAG}")
+          echo "TAG=${TAG}" >> "$GITHUB_ENV"
+          echo "COMMIT=${COMMIT}" >> "$GITHUB_ENV"
+          echo "building for ${TAG} at ${COMMIT}"
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+      - name: build the setup scripts for that commit
         run: |
           ./build-setup-script.sh "${COMMIT}" > setup-script.sh
           ./build-setup-script.sh --embed "${COMMIT}" > setup-script-embedded.sh
           sha256sum setup-script.sh setup-script-embedded.sh > SHA256SUMS
-        env:
-          COMMIT: ${{ github.sha }}
-      - name: the download form really installs this commit
+      - name: the download form really installs that commit
         run: |
           sudo bash setup-script.sh
           sudo /usr/local/bin/zstd-overlay version | tee version.txt
           grep -q "commit ${COMMIT:0:7}," version.txt
-        env:
-          COMMIT: ${{ github.sha }}
       - name: publish the release, or add the files to one made by hand
         run: |
           if gh release view "${TAG}" >/dev/null 2>&1; then
@@ -46,5 +57,3 @@ jobs:
           fi
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
-          COMMIT: ${{ github.sha }}

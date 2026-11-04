@@ -55,7 +55,9 @@ SCRIPT
 else
   payload=$(printf '%s\n' "$tool" | xz -9e --format=xz | base64 -w 76)
   # The module docstring, as a comment: from line 2 to the closing quotes.
-  help=$(printf '%s\n' "$tool" | awk 'NR==2{sub(/^"""/,"")} NR>=2{if($0=="\"\"\"")exit; print "#   " $0}')
+  # awk reads all of its input: an early exit left printf with a broken pipe, which pipefail
+  # turned into a failure on the CI runner.
+  help=$(printf '%s\n' "$tool" | awk 'NR==2{sub(/^"""/,"")} NR>=2 && !done {if($0=="\"\"\""){done=1} else print "#   " $0}')
   out=$(cat <<SCRIPT
 $header
 # Built from $path at $sha ($date) by build-setup-script.sh --embed. The code is
