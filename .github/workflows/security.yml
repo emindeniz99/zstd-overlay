@@ -1,0 +1,46 @@
+name: security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "41 3 * * 1"   # weekly, so a new gitleaks rule set still runs over the history
+
+permissions:
+  contents: read
+
+jobs:
+  secrets:
+    name: gitleaks over the history and the tree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: gitleaks (pinned release, checksum verified)
+        run: |
+          curl -fsSL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz -o gitleaks.tgz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  gitleaks.tgz" | sha256sum -c
+          tar -xzf gitleaks.tgz gitleaks
+          ./gitleaks git --no-banner --redact --exit-code 1 .
+          ./gitleaks dir --no-banner --redact --exit-code 1 .
+
+  static:
+    name: shellcheck and bandit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: shellcheck the harness, the builder and both scripts it emits
+        run: |
+          ./build-setup-script.sh --embed HEAD > /tmp/embedded.sh
+          ./build-setup-script.sh HEAD > /tmp/fetch.sh
+          shellcheck -S warning build-setup-script.sh tests/run.sh /tmp/embedded.sh /tmp/fetch.sh
+      - name: install uv
+        run: python3 -m pip install --user uv==0.13.5 && echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: bandit
+        # B101 assert, B404/B603/B607 subprocess with fixed argument lists: how the tool works.
+        run: uv tool run bandit==1.9.3 -q -s B101,B404,B603,B607 zstd-overlay
