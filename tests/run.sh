@@ -648,18 +648,20 @@ s23() {
   scenario 23 "the image fills while the caches move in: no file is lost or truncated"
   start s23
   # Field report (2026-11-05): 0.2.1 left the file it was copying truncated in a full image,
-  # dated the stamp anyway, and the next up deleted the intact original as a leftover.
-  xs 'mkdir -p /root/.cache/big /root/.cargo && for i in 1 2 3 4 5 6 7; do head -c 100M /dev/urandom > /root/.cache/big/r$i; done
-      printf "#!/bin/sh\nexport PATH=\"\$HOME/.cargo/bin:\$PATH\"\n" > /root/.cargo/env && echo small > /root/.cache/small'
-  local before; before=$(x 'cd /root && find .cache .cargo -type f -exec sha256sum {} + | sort -k2')
-  # A reserve that leaves the image at its 512 MiB floor: 700 MiB of random data cannot fit.
-  local out; out=$(x "ZSTD_OVERLAY_RESERVE_MB=\$((\$(df -B1M --output=avail / | tail -1) - 256)) $ZO up 2>&1; echo exit=\$?")
+  # dated the stamp anyway, and the next up deleted the intact original as a leftover. The
+  # image must be big enough (2.5 GiB) for btrfs to keep metadata apart from data: then a file
+  # is created and its write fails, which is what left the truncated copies. 3 GiB of random
+  # data fill the data space while ~/.cache moves in; ~/.npm's file is created and fails too.
+  xs 'mkdir -p /root/.cache/big /root/.npm && for i in $(seq 1 30); do head -c 100M /dev/urandom > /root/.cache/big/r$i; done
+      head -c 50M /dev/urandom > /root/.npm/blob && echo "version = 12" > /root/.npm/settings.toml'
+  local before; before=$(x 'cd /root && find .cache .npm -type f -exec sha256sum {} + | sort -k2')
+  local out; out=$(x "ZSTD_OVERLAY_RESERVE_MB=\$((\$(df -B1M --output=avail / | tail -1) - 2560)) $ZO up 2>&1; echo exit=\$?")
   check "the first up runs out of space" has "$out" "No space left on device"
   check "and leaves no partial copy in the image" eq "$(x 'find /mnt/zstd-overlay/upper -name .zstd-overlay-partial | wc -l')" 0
   out=$(x "$ZO up 2>&1; echo exit=\$?")
   check "the next up, with room, exits 0" has "$out" "exit=0"
-  check "and mounts ~/.cache and ~/.cargo" eq "$(x 'findmnt -rn -t overlay -o TARGET | grep -cxE "/root/.cache|/root/.cargo"')" 2
-  check "every file is whole, by SHA-256" eq "$(x 'cd /root && find .cache .cargo -type f -exec sha256sum {} + | sort -k2')" "$before"
+  check "and mounts ~/.cache and ~/.npm" eq "$(x 'findmnt -rn -t overlay -o TARGET | grep -cxE "/root/.cache|/root/.npm"')" 2
+  check "every file is whole, by SHA-256" eq "$(x 'cd /root && find .cache .npm -type f -exec sha256sum {} + | sort -k2')" "$before"
   done_scenario
 }
 
