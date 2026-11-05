@@ -644,11 +644,32 @@ s22() {
   done_scenario
 }
 
+s23() {
+  scenario 23 "the image fills while the caches move in: no file is lost or truncated"
+  start s23
+  # Field report (2026-11-05): 0.2.1 left the file it was copying truncated in a full image,
+  # dated the stamp anyway, and the next up deleted the intact original as a leftover. The
+  # image must be big enough (2.5 GiB) for btrfs to keep metadata apart from data: then a file
+  # is created and its write fails, which is what left the truncated copies. 3 GiB of random
+  # data fill the data space while ~/.cache moves in; ~/.npm's file is created and fails too.
+  xs 'mkdir -p /root/.cache/big /root/.npm && for i in $(seq 1 30); do head -c 100M /dev/urandom > /root/.cache/big/r$i; done
+      head -c 50M /dev/urandom > /root/.npm/blob && echo "version = 12" > /root/.npm/settings.toml'
+  local before; before=$(x 'cd /root && find .cache .npm -type f -exec sha256sum {} + | sort -k2')
+  local out; out=$(x "ZSTD_OVERLAY_RESERVE_MB=\$((\$(df -B1M --output=avail / | tail -1) - 2560)) $ZO up 2>&1; echo exit=\$?")
+  check "the first up runs out of space" has "$out" "No space left on device"
+  check "and leaves no partial copy in the image" eq "$(x 'find /mnt/zstd-overlay/upper -name .zstd-overlay-partial | wc -l')" 0
+  out=$(x "$ZO up 2>&1; echo exit=\$?")
+  check "the next up, with room, exits 0" has "$out" "exit=0"
+  check "and mounts ~/.cache and ~/.npm" eq "$(x 'findmnt -rn -t overlay -o TARGET | grep -cxE "/root/.cache|/root/.npm"')" 2
+  check "every file is whole, by SHA-256" eq "$(x 'cd /root && find .cache .npm -type f -exec sha256sum {} + | sort -k2')" "$before"
+  done_scenario
+}
+
 # --- main ------------------------------------------------------------------------
 
 [ "$(id -u)" = 0 ] || { echo "run as root (privileged containers)"; exit 2; }
 build_images || { echo "could not build the test images; see $LOG"; exit 2; }
-want=("$@"); [ ${#want[@]} -gt 0 ] || want=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22)
+want=("$@"); [ ${#want[@]} -gt 0 ] || want=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23)
 for n in "${want[@]}"; do "s$n"; done
 echo; echo "== $PASS passed, $FAIL failed, $SKIP skipped (log: $LOG)"; printf '   %s\n' "${RESULTS[@]}"
 [ "$FAIL" = 0 ]
