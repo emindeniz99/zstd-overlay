@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/emindeniz99/zstd-overlay/compare/v0.2.1...v0.2.2) (2026-11-08)
+
+
+### Bug Fixes
+
+* **tool:** never delete a cache file when the image fills mid-move ([67c96bb](https://github.com/emindeniz99/zstd-overlay/commit/67c96bb794b928f183b49c354addf1abdde8c1f5))
+
 ## [0.2.1](https://github.com/emindeniz99/zstd-overlay/compare/v0.2.0...v0.2.1) (2026-11-04)
 
 
