@@ -79,7 +79,7 @@ MIN_CAPACITY = 512 * MiB
 BTRFS_IOC_RESIZE = 0x50009403  # _IOW(0x94, 3, struct btrfs_ioctl_vol_args), 4096 bytes
 LOOP_SET_CAPACITY = 0x4C07
 LOOP_SET_DIRECT_IO = 0x4C08
-VERSION = "0.2.1"  # x-release-please-version
+VERSION = "0.2.2"  # x-release-please-version
 # `git archive` fills this in (.gitattributes: export-subst); a checkout leaves it as is.
 # The full id and the commit time as plain seconds: GitHub's archive of a commit fills the
 # placeholder too, and the setup script checks that file's SHA-256 against one computed
