@@ -582,6 +582,75 @@ def test_absorb_drops_a_leftover_the_image_had_superseded(tmp_path):
     assert list(lower.iterdir()) == []  # nothing left below the mount, the leftover included
 
 
+def _fill_up_on(name: str, monkeypatch):
+    # The image runs out of space while one file is copied: half of it is written, then ENOSPC.
+    real = zo.copy_entry
+
+    def copy_entry(src: str, dst: str) -> None:
+        if os.path.basename(src) == name:
+            with open(dst, "wb") as f:
+                f.write(Path(src).read_bytes()[:3])
+            raise OSError(28, "No space left on device", dst)
+        real(src, dst)
+
+    monkeypatch.setattr(zo, "copy_entry", copy_entry)
+
+
+def test_a_full_image_leaves_no_truncated_copy_and_the_original(tmp_path, monkeypatch):
+    # Field report (2026-11-05): the image filled mid-copy and left a truncated file under the
+    # real name; the next up took it for the image's version and deleted the intact original.
+    lower, upper = tmp_path / "lower", tmp_path / "upper"
+    (lower / "conf").mkdir(parents=True)
+    (lower / "conf" / "settings.toml").write_text('version = "12"\n')
+    _fill_up_on("settings.toml", monkeypatch)
+    with pytest.raises(OSError, match="No space left"):
+        zo.absorb(str(lower), str(upper))
+    assert not (upper / "conf" / "settings.toml").exists()
+    assert not (upper / "conf" / zo.PARTIAL).exists()
+    assert (lower / "conf" / "settings.toml").read_text() == 'version = "12"\n'
+
+
+def test_a_full_image_keeps_the_images_previous_version(tmp_path, monkeypatch):
+    lower, upper = tmp_path / "lower", tmp_path / "upper"
+    (lower / "conf").mkdir(parents=True)
+    (upper / "conf").mkdir(parents=True)
+    (upper / "conf" / "settings.toml").write_text("the image's version")
+    (lower / "conf" / "settings.toml").write_text("written while unmounted")
+    _fill_up_on("settings.toml", monkeypatch)
+    with pytest.raises(OSError, match="No space left"):
+        zo.absorb(str(lower), str(upper))
+    assert (upper / "conf" / "settings.toml").read_text() == "the image's version"
+    assert (lower / "conf" / "settings.toml").read_text() == "written while unmounted"
+
+
+def test_the_run_after_a_full_image_moves_the_original_whole(tmp_path, monkeypatch):
+    lower, upper = tmp_path / "lower", tmp_path / "upper"
+    (lower / "conf").mkdir(parents=True)
+    (lower / "conf" / "settings.toml").write_text('version = "12"\n')
+    # 0.2.1 dated the stamp before the absorb also when the mount then failed: the next run saw
+    # the original as older than "the last mount", and with a truncated copy in the image it
+    # deleted the original. With nothing truncated left behind, the original moves whole.
+    mounted = _stamp_then_wait(tmp_path)
+    _fill_up_on("settings.toml", monkeypatch)
+    with pytest.raises(OSError, match="No space left"):
+        zo.absorb(str(lower), str(upper))
+    monkeypatch.undo()
+    zo.absorb(str(lower), str(upper), mounted)
+    assert (upper / "conf" / "settings.toml").read_text() == 'version = "12"\n'
+    assert list(lower.iterdir()) == []
+
+
+def test_a_partial_copy_a_kill_left_is_cleared_by_the_next_copy(tmp_path):
+    lower, upper = tmp_path / "lower", tmp_path / "upper"
+    (lower / "conf").mkdir(parents=True)
+    (upper / "conf").mkdir(parents=True)
+    (upper / "conf" / zo.PARTIAL).write_bytes(b"ver")  # what a kill mid-copy leaves
+    (lower / "conf" / "settings.toml").write_text('version = "12"\n')
+    zo.absorb(str(lower), str(upper))
+    assert (upper / "conf" / "settings.toml").read_text() == 'version = "12"\n'
+    assert not (upper / "conf" / zo.PARTIAL).exists()
+
+
 # --- the files Claude Code reads before the hook ----------------------------------------------
 
 

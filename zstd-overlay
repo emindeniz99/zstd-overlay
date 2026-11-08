@@ -663,6 +663,9 @@ class Session:
     def stamp(self, path: str) -> str:
         return os.path.join(self.cfg.mnt, "stamps", key_of(path))
 
+    def pending_stamp(self, path: str) -> str:
+        return self.stamp(path) + ".pending"
+
     def upper(self, path: str) -> str:
         return os.path.join(self.cfg.mnt, "upper", key_of(path))
 
@@ -800,7 +803,10 @@ class Session:
             # in between (an MCP server, a hook running beside this one) sits below the mount with
             # a ctime before the mount's, and the next absorb must move it in, not drop it as a
             # leftover. Touched here, not after the mount, so the file's ctime is the later one.
-            Path(stamp).touch()
+            # It is written under a pending name and becomes the stamp only once the folder is
+            # mounted: a run that stops before (a full image, a kill) keeps the last real mount's
+            # time, so the next absorb does not take files that were never mounted for leftovers.
+            Path(self.pending_stamp(path)).touch()
             n, size = absorb(path, upper, mounted_ns)
             if n:
                 self.say(f"moved {n} files ({gib(size)}) from the normal disk into the image: {path}")
@@ -848,8 +854,10 @@ class Session:
             if aside:
                 run("cp", "-a", f"{aside}/.", f"{path}/")
                 self.say(f"merged {len(hidden)} changed files into {path} (the normal disk's versions win)")
-            if repos:  # a cache's stamp was dated before the absorb
+            if repos:
                 Path(self.stamp(path)).touch()
+            else:  # a cache's stamp was dated before the absorb
+                os.replace(self.pending_stamp(path), self.stamp(path))
         except (Stop, OSError) as e:
             # Back to the normal disk, so that "NOT MOUNTED" is true; the repositories' folder
             # keeps its previous stamp, so the next start sees the same changed files.
@@ -1078,11 +1086,15 @@ def absorb(lower: str, upper: str, mounted_ns: int | None = None) -> tuple[int, 
     """Move everything below `lower` (one filesystem) into `upper`, keeping modes, owners,
     times, symlinks and hard links; leave `lower` itself empty. Called while the folder is not
     mounted. A file written after the last mount (ctime newer than `mounted_ns`) replaces the
-    image's version: it is the newest. A file that was already there at the last mount but did
-    not show through it, because the image has its own version or deleted or replaced a folder
-    above it, is a leftover (94085a131cbe's merge left such copies); it is removed. Kill-safe:
-    each file is copied before its original is removed, so a kill leaves at most a file in both
-    places, which the next run moves again. Returns (files moved, their bytes)."""
+    image's version: it is the newest. `mounted_ns` must be the time of a mount that happened:
+    a run that stopped before mounting keeps the previous one (`Session.mount_dir`). A file
+    that was already there at the last mount but did not show through it, because the image
+    has its own version or deleted or replaced a folder above it, is a leftover
+    (94085a131cbe's merge left such copies); it is removed. Kill-safe: each file is copied
+    before its original is removed, so a kill leaves at most a file in both places, which the
+    next run moves again; and a copy appears under its name only once it is whole
+    (`copy_whole`), so a full image or a kill mid-copy never leaves a truncated file that the
+    next run would take for the image's version. Returns (files moved, their bytes)."""
     dev = os.lstat(lower).st_dev
     linked: dict[tuple[int, int], str] = {}
     # Removing one name of a hard-linked file sets the inode's ctime to now: judge every name
@@ -1121,12 +1133,14 @@ def absorb(lower: str, upper: str, mounted_ns: int | None = None) -> tuple[int, 
                 os.unlink(src)  # a leftover from before the last mount: the image's version is newer
                 continue
             ensure(root, dst_root)  # a new file in a folder the image had deleted brings it back
-            remove(dst)
             # By inode alone: moving the first name already dropped this one's link count.
             if stat.S_ISREG(st.st_mode) and (st.st_dev, st.st_ino) in linked:
+                remove(dst)
                 os.link(linked[(st.st_dev, st.st_ino)], dst)
             elif stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode):
-                copy_entry(src, dst)
+                if real_dir(dst):
+                    remove(dst)
+                copy_whole(src, dst)
                 if stat.S_ISREG(st.st_mode) and st.st_nlink > 1:
                     linked[(st.st_dev, st.st_ino)] = dst
                 size += st.st_size if stat.S_ISREG(st.st_mode) else 0
@@ -1294,6 +1308,28 @@ def copy_entry(src: str, dst: str) -> None:
     st = os.lstat(src)
     shutil.copy2(src, dst, follow_symlinks=False)
     os.lchown(dst, st.st_uid, st.st_gid)
+
+
+# The name a copy is written under in its folder until it is whole. One per folder: `up` holds
+# the lock, so one copy runs at a time.
+PARTIAL = ".zstd-overlay-partial"
+
+
+def copy_whole(src: str, dst: str) -> None:
+    """copy_entry, but `dst` is replaced only by a complete copy. The copy is written under
+    PARTIAL in the same folder and renamed over `dst`: a full image (ENOSPC) or a kill mid-copy
+    leaves `dst` as it was, never truncated. A truncated file under the real name was taken for
+    the image's version by the next absorb, which then deleted the intact original as a
+    leftover (field report, 2026-11-05: 11 files lost after the image filled)."""
+    tmp = os.path.join(os.path.dirname(dst), PARTIAL)
+    remove(tmp)  # one a killed run left
+    try:
+        copy_entry(src, tmp)
+        os.replace(tmp, dst)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 @contextlib.contextmanager
